@@ -1,0 +1,250 @@
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import requests
+import io
+import plotly.graph_objects as go
+from datetime import datetime
+import urllib3
+
+# 忽略 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ==========================================
+# 1. 頁面設定
+# ==========================================
+st.set_page_config(
+    page_title="Josh 的狙擊手戰情室",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("🎯 Josh 的股市狙擊手戰情室")
+st.markdown("### 專屬策略：多頭排列 + 爆量攻擊 + RSI 強勢")
+
+# ==========================================
+# 2. 側邊欄：參數設定
+# ==========================================
+st.sidebar.header("⚙️ 策略參數設定")
+
+# 讓您可以隨時調整濾網鬆緊
+min_volume = st.sidebar.number_input("最低成交量 (張)", value=800, step=100)
+vol_ratio = st.sidebar.slider("爆量係數 (今日 > N倍均量)", 1.0, 3.0, 1.2, 0.1)
+rsi_min = st.sidebar.slider("RSI 最低門檻", 30, 70, 55)
+rsi_max = st.sidebar.slider("RSI 最高門檻 (避免過熱)", 70, 100, 85)
+ma_short = st.sidebar.number_input("短期均線 (MA)", value=20)
+ma_long = st.sidebar.number_input("長期均線 (MA)", value=60)
+
+st.sidebar.markdown("---")
+st.sidebar.info(
+    """
+    **📌 交易紀律提醒 (SOP)**
+    1. **停損**：收盤跌破 MA20 或 虧損 -7%。
+    2. **停利**：獲利 +10% 先賣一半。
+    3. **續抱**：剩下一半沿著 MA20 抱，跌破才賣。
+    """
+)
+
+# ==========================================
+# 3. 核心函數
+# ==========================================
+
+@st.cache_data(ttl=86400) # 快取 24 小時，避免重複抓清單
+def get_tw_stock_list():
+    """自動抓取證交所最新清單 (含00補齊與中文修正)"""
+    try:
+        url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+        res = requests.get(url, verify=False)
+        html_data = io.StringIO(res.text)
+        df = pd.read_html(html_data)[0]
+        df.columns = df.iloc[0]
+        df = df.iloc[1:]
+        # 中文處理
+        df['有價證券代號及名稱'] = df['有價證券代號及名稱'].astype(str).str.replace('　', ' ')
+        df[['代號', '名稱']] = df['有價證券代號及名稱'].str.split(pat=' ', n=1, expand=True)
+        # 過濾股票
+        df = df[df['代號'].str.len() == 4]
+        df['代號'] = df['代號'].astype(str).str.zfill(4)
+        return df[['代號', '名稱']]
+    except Exception as e:
+        st.error(f"抓取股票清單失敗: {e}")
+        return pd.DataFrame()
+
+def get_stock_data(tickers):
+    """下載數據"""
+    try:
+        # 下載 120 天以計算 MA60
+        data = yf.download(tickers, period="120d", interval="1d", group_by='ticker', threads=True, progress=False)
+        return data
+    except Exception:
+        return pd.DataFrame()
+
+def calculate_indicators(df):
+    """計算技術指標"""
+    # MA
+    df['MA20'] = df['Close'].rolling(window=ma_short).mean()
+    df['MA60'] = df['Close'].rolling(window=ma_long).mean()
+    # Volume MA
+    df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
+    # RSI (簡單版)
+    delta = df['Close'].diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    ema_down = down.ewm(com=13, adjust=False).mean()
+    rs = ema_up / ema_down
+    df['RSI'] = 100 - (100 / (1 + rs))
+    # Donchian High (60日高點)
+    df['High60'] = df['Close'].rolling(window=60).max()
+    return df
+
+# ==========================================
+# 4. 主程式邏輯
+# ==========================================
+
+# 步驟 1: 取得清單
+with st.spinner("正在更新全台股票清單..."):
+    stock_list_df = get_tw_stock_list()
+
+if stock_list_df.empty:
+    st.stop()
+
+# 顯示開始按鈕
+if st.button("🚀 啟動全市場掃描 (約需 1-2 分鐘)"):
+    
+    st.write("正在掃描市場，請稍候...")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # 準備資料
+    stock_map = dict(zip(stock_list_df['代號'], stock_list_df['名稱']))
+    tickers = [f"{x}.TW" for x in stock_list_df['代號'].tolist()]
+    
+    # 批次處理
+    chunk_size = 50 # 稍微調小一點避免 Streamlit 記憶體爆掉
+    total = len(tickers)
+    results = []
+    
+    for i in range(0, total, chunk_size):
+        chunk = tickers[i : i + chunk_size]
+        
+        # 更新進度條
+        progress = min((i + chunk_size) / total, 1.0)
+        progress_bar.progress(progress)
+        status_text.text(f"掃描進度：{i}/{total} ...")
+        
+        # 下載與分析
+        data = get_stock_data(chunk)
+        
+        if not data.empty:
+            for ticker in chunk:
+                try:
+                    if len(chunk) == 1:
+                        df = data
+                    else:
+                        if ticker not in data.columns.levels[0]: continue
+                        df = data[ticker].copy()
+                    
+                    df = df.dropna(subset=['Close'])
+                    if len(df) < ma_long: continue
+                    
+                    # 計算指標
+                    df = calculate_indicators(df)
+                    latest = df.iloc[-1]
+                    
+                    # 取值
+                    close = float(latest['Close'])
+                    ma20 = float(latest['MA20'])
+                    ma60 = float(latest['MA60'])
+                    vol = int(float(latest['Volume']) / 1000)
+                    vol_ma5 = int(float(latest['Vol_MA5']) / 1000)
+                    rsi = float(latest['RSI'])
+                    high60 = float(latest['High60'])
+                    
+                    # --- 篩選邏輯 ---
+                    cond1 = (close > ma20) and (ma20 > ma60) # 多頭排列
+                    cond2 = vol >= min_volume # 基本量能
+                    cond3 = vol > (vol_ma5 * vol_ratio) # 爆量
+                    cond4 = (rsi >= rsi_min) and (rsi <= rsi_max) # RSI 強勢
+                    cond5 = close >= (high60 * 0.95) # 接近新高
+                    
+                    if cond1 and cond2 and cond3 and cond4 and cond5:
+                        stock_id = ticker.replace(".TW", "")
+                        results.append({
+                            "代號": stock_id,
+                            "名稱": stock_map.get(stock_id, stock_id),
+                            "收盤價": round(close, 2),
+                            "漲跌幅%": round(df['Close'].pct_change().iloc[-1] * 100, 2),
+                            "RSI": round(rsi, 1),
+                            "成交量(張)": vol,
+                            "爆量倍數": round(vol/vol_ma5, 1) if vol_ma5 > 0 else 0
+                        })
+                except:
+                    continue
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # ==========================================
+    # 5. 顯示結果
+    # ==========================================
+    if results:
+        res_df = pd.DataFrame(results)
+        # 依照 RSI 排序
+        res_df = res_df.sort_values(by="RSI", ascending=False)
+        
+        st.success(f"掃描完成！共發現 {len(res_df)} 檔潛力股")
+        
+        # 顯示互動表格
+        st.dataframe(res_df, use_container_width=True)
+        
+        # 存檔供下載
+        csv = res_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 下載篩選結果 CSV",
+            data=csv,
+            file_name=f"sniper_list_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime='text/csv',
+        )
+        
+        st.markdown("---")
+        st.subheader("📊 個股 K 線圖檢視")
+        
+        # 選擇股票查看圖表
+        selected_stock = st.selectbox(
+            "請選擇要查看的股票：",
+            res_df['代號'] + " " + res_df['名稱']
+        )
+        
+        if selected_stock:
+            stock_code = selected_stock.split(" ")[0]
+            st.write(f"正在載入 {stock_code} 圖表...")
+            
+            # 抓取該股票詳細資料畫圖
+            chart_data = yf.download(f"{stock_code}.TW", period="6mo", interval="1d", progress=False)
+            
+            if isinstance(chart_data.columns, pd.MultiIndex):
+                chart_data.columns = chart_data.columns.get_level_values(0)
+                
+            # 計算均線供畫圖用
+            chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
+            chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
+            
+            # 使用 Plotly 畫互動圖
+            fig = go.Figure(data=[go.Candlestick(x=chart_data.index,
+                            open=chart_data['Open'],
+                            high=chart_data['High'],
+                            low=chart_data['Low'],
+                            close=chart_data['Close'],
+                            name='K線')])
+            
+            # 加上均線
+            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA20'], line=dict(color='orange', width=1), name='MA20'))
+            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA60'], line=dict(color='green', width=1), name='MA60'))
+            
+            fig.update_layout(title=f"{selected_stock} 日線圖", xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.warning("今日無符合條件的股票，建議觀望。")
