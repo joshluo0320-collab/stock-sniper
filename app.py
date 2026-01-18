@@ -14,14 +14,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (雙重回測版)",
+    page_title="Josh 的狙擊手戰情室 (精準版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭排列 + 爆量 + **5日/10日雙勝率回測**")
+st.markdown("### 專屬策略：多頭排列 + 爆量 + **雙勝率回測 (小數點2位版)**")
 
 # ==========================================
 # 2. 側邊欄：參數設定
@@ -130,7 +130,7 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
             return 0.0 # 若無訊號回傳 0 方便運算
             
         win_rate = (wins / total_signals) * 100
-        return round(win_rate, 1)
+        return round(win_rate, 2) # 改為小數點後2位
         
     except Exception:
         return 0.0
@@ -208,8 +208,8 @@ if st.button("🚀 啟動雙重勝率掃描"):
                             "代號": stock_id,
                             "名稱": stock_map.get(stock_id, stock_id),
                             "收盤價": round(close, 2),
-                            "RSI": round(rsi, 1),
-                            "爆量倍數": round(vol/vol_ma5, 1) if vol_ma5 > 0 else 0,
+                            "RSI": round(rsi, 2),  # 改為2位
+                            "爆量倍數": round(vol/vol_ma5, 2) if vol_ma5 > 0 else 0, # 改為2位
                             "⚡5日勝率%": win_5d,
                             "🎯10日勝率%": win_10d
                         })
@@ -233,10 +233,16 @@ if st.button("🚀 啟動雙重勝率掃描"):
             is_high = s >= 50
             return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
 
-        # 套用樣式到 dataframe
+        # 套用樣式到 dataframe，並設定全欄位 2 位小數格式
         st.dataframe(
             res_df.style.apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
-                  .format({"⚡5日勝率%": "{:.1f}", "🎯10日勝率%": "{:.1f}"}),
+                  .format({
+                      "收盤價": "{:.2f}",
+                      "RSI": "{:.2f}",
+                      "爆量倍數": "{:.2f}",
+                      "⚡5日勝率%": "{:.2f}",
+                      "🎯10日勝率%": "{:.2f}"
+                  }),
             use_container_width=True
         )
         
