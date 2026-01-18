@@ -14,14 +14,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (最終修正版)",
+    page_title="Josh 的狙擊手戰情室 (數值直觀版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭排列 + 爆量 + **雙勝率回測**")
+st.markdown("### 專屬策略：多頭排列 + 爆量 + **停損停利價格預算**")
 
 # ==========================================
 # 2. 側邊欄：參數與戰術看板
@@ -36,25 +36,29 @@ ma_short = st.sidebar.number_input("短期均線 (MA)", value=20)
 ma_long = st.sidebar.number_input("長期均線 (MA)", value=60)
 
 st.sidebar.markdown("---")
+st.sidebar.header("💰 風險管理設定 (直觀 %)")
+take_profit_pct = st.sidebar.slider("🎯 預期獲利目標 (%)", 5, 30, 10, 1)
+stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
 
-# 進出場戰術看板 (注意：這裡的引號必須成對)
+st.sidebar.markdown("---")
+
+# 進出場戰術看板 (動態顯示 % 數)
 with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True):
-    st.markdown("""
-    #### ✅ 進場檢查表 (Entry)
-    1. **趨勢**：股價 > 月線 > 季線。
+    st.markdown(f"""
+    #### ✅ 進場檢查 (Entry)
+    1. **趨勢**：多頭排列 (股價 > 月 > 季)。
     2. **動能**：RSI 在 55~85。
-    3. **籌碼**：爆量 > 5日均量 1.2倍。
-    4. **位階**：近季高點附近。
+    3. **籌碼**：爆量 > 1.2倍均量。
     
     #### 🛑 出場準則 (Exit)
     1. **停損 (防守)**：
-       - **跌破 月線(20MA)** ➜ 離場。
+       - **虧損達 -{stop_loss_pct}%** ➜ **強制離場**。
+       - 或 **跌破月線** (兩者取其輕)。
     2. **停利 (進攻)**：
-       - **RSI > 85** ➜ 過熱減碼。
-       - **爆大量不漲** ➜ 減碼。
-       - **乖離過大** ➜ 準備下車。
+       - **獲利達 +{take_profit_pct}%** ➜ 分批獲利。
+       - 或 **RSI > 85** (過熱)。
     """)
-    st.warning("⚠️ 紀律大於預測！")
+    st.warning(f"⚠️ 紀律：虧損不可超過 {stop_loss_pct}%！")
 
 st.sidebar.markdown("---")
 st.sidebar.info(
@@ -141,10 +145,9 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
         return 0.0
 
 # ==========================================
-# 4. 主程式邏輯 (加入 Session State)
+# 4. 主程式邏輯
 # ==========================================
 
-# 初始化 session_state
 if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = None
 
@@ -157,7 +160,7 @@ if stock_list_df.empty:
 # --- 按鈕區塊 ---
 if st.button("🚀 啟動雙重勝率掃描"):
     
-    st.write("正在進行雙重歷史模擬，運算量較大請稍候...")
+    st.write(f"正在掃描... 同時計算停損(-{stop_loss_pct}%) 與 停利(+{take_profit_pct}%) 價格")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -188,103 +191,4 @@ if st.button("🚀 啟動雙重勝率掃描"):
                     df = df.dropna(subset=['Close'])
                     if len(df) < 100: continue
                     
-                    df = calculate_indicators(df)
-                    latest = df.iloc[-1]
-                    
-                    # 取值
-                    close = float(latest['Close'])
-                    ma20 = float(latest['MA20'])
-                    ma60 = float(latest['MA60'])
-                    vol = int(float(latest['Volume']) / 1000)
-                    vol_ma5 = int(float(latest['Vol_MA5']) / 1000)
-                    rsi = float(latest['RSI'])
-                    high60 = float(latest['High60'])
-                    
-                    # 篩選條件
-                    cond1 = (close > ma20) and (ma20 > ma60)
-                    cond2 = vol >= min_volume
-                    cond3 = vol > (vol_ma5 * vol_ratio)
-                    cond4 = (rsi >= rsi_min) and (rsi <= rsi_max)
-                    cond5 = close >= (high60 * 0.95)
-                    
-                    if cond1 and cond2 and cond3 and cond4 and cond5:
-                        stock_id = ticker.replace(".TW", "")
-                        win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=0.10)
-                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10)
-                        
-                        results.append({
-                            "代號": stock_id,
-                            "名稱": stock_map.get(stock_id, stock_id),
-                            "收盤價": round(close, 2),
-                            "RSI": round(rsi, 2),
-                            "爆量倍數": round(vol/vol_ma5, 2) if vol_ma5 > 0 else 0,
-                            "⚡5日勝率%": win_5d,
-                            "🎯10日勝率%": win_10d
-                        })
-                except:
-                    continue
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    if results:
-        res_df = pd.DataFrame(results)
-        res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
-        st.session_state['scan_results'] = res_df
-        st.success(f"掃描完成！共發現 {len(res_df)} 檔潛力股")
-    else:
-        st.warning("今日無符合條件的股票。")
-        st.session_state['scan_results'] = None
-
-# --- 顯示區塊 ---
-if st.session_state['scan_results'] is not None:
-    res_df = st.session_state['scan_results']
-    
-    def highlight_high_win_rate(s):
-        is_high = s >= 50
-        return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
-
-    st.dataframe(
-        res_df.style.apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
-              .format({
-                  "收盤價": "{:.2f}",
-                  "RSI": "{:.2f}",
-                  "爆量倍數": "{:.2f}",
-                  "⚡5日勝率%": "{:.2f}",
-                  "🎯10日勝率%": "{:.2f}"
-              }),
-        use_container_width=True
-    )
-    
-    csv = res_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 下載雙勝率報表 CSV",
-        data=csv,
-        file_name=f"sniper_winrate_dual_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime='text/csv',
-    )
-    
-    st.markdown("---")
-    st.subheader("📊 個股 K 線圖檢視")
-    
-    selected_stock = st.selectbox("請選擇股票：", res_df['代號'] + " " + res_df['名稱'])
-    
-    if selected_stock:
-        stock_code = selected_stock.split(" ")[0]
-        try:
-            chart_data = yf.download(f"{stock_code}.TW", period="6mo", interval="1d", progress=False)
-            if isinstance(chart_data.columns, pd.MultiIndex):
-                chart_data.columns = chart_data.columns.get_level_values(0)
-            
-            chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
-            chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
-            
-            fig = go.Figure(data=[go.Candlestick(x=chart_data.index,
-                            open=chart_data['Open'], high=chart_data['High'],
-                            low=chart_data['Low'], close=chart_data['Close'], name='K線')])
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA20'], line=dict(color='orange', width=1), name='MA20'))
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA60'], line=dict(color='green', width=1), name='MA60'))
-            fig.update_layout(title=f"{selected_stock} 日線圖", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception:
-            st.error("圖表載入失敗，可能是網路連線問題。")
+                    df
