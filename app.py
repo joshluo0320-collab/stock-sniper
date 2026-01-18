@@ -252,4 +252,13 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
             chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
             chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
             
-            fig
+            fig = go.Figure(data=[go.Candlestick(x=chart_data.index,
+                            open=chart_data['Open'], high=chart_data['High'],
+                            low=chart_data['Low'], close=chart_data['Close'], name='K線')])
+            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA20'], line=dict(color='orange', width=1), name='MA20'))
+            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA60'], line=dict(color='green', width=1), name='MA60'))
+            fig.update_layout(title=f"{selected_stock} 日線圖", xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.warning("今日無符合條件的股票。")
