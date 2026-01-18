@@ -14,14 +14,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (完全修復版)",
+    page_title="Josh 的狙擊手戰情室 (全連動版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭排列 + 爆量 + **停損停利價格預算**")
+st.markdown("### 專屬策略：多頭排列 + 爆量 + **動態勝率連動**")
 
 # ==========================================
 # 2. 側邊欄：參數與戰術看板
@@ -36,15 +36,15 @@ ma_short = st.sidebar.number_input("短期均線 (MA)", value=20)
 ma_long = st.sidebar.number_input("長期均線 (MA)", value=60)
 
 st.sidebar.markdown("---")
-st.sidebar.header("💰 風險管理設定 (直觀 %)")
+st.sidebar.header("💰 風險與目標設定 (連動勝率)")
+# 這裡設定的 % 數，現在會直接影響勝率計算！
 take_profit_pct = st.sidebar.slider("🎯 預期獲利目標 (%)", 5, 30, 10, 1)
 stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
 
 st.sidebar.markdown("---")
 
-# 進出場戰術看板 (動態顯示 % 數)
+# 進出場戰術看板
 with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True):
-    # ★★★ 注意：這裡使用了 f""" ... """，請確保這段文字完整複製 ★★★
     st.markdown(f"""
     #### ✅ 進場檢查 (Entry)
     1. **趨勢**：多頭排列 (股價 > 月 > 季)。
@@ -54,7 +54,7 @@ with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True)
     #### 🛑 出場準則 (Exit)
     1. **停損 (防守)**：
        - **虧損達 -{stop_loss_pct}%** ➜ **強制離場**。
-       - 或 **跌破月線** (兩者取其輕)。
+       - 或 **跌破月線**。
     2. **停利 (進攻)**：
        - **獲利達 +{take_profit_pct}%** ➜ 分批獲利。
        - 或 **RSI > 85** (過熱)。
@@ -63,11 +63,11 @@ with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True)
 
 st.sidebar.markdown("---")
 st.sidebar.info(
-    """
-    **📊 勝率分析定義**
+    f"""
+    **📊 動態勝率定義 (隨滑桿變動)**
     * **回測期間**：過去 1 年
-    * **5日勝率**：5天內觸及 +10%
-    * **10日勝率**：10天內觸及 +10%
+    * **5日勝率**：5天內是否觸及 **+{take_profit_pct}%**
+    * **10日勝率**：10天內是否觸及 **+{take_profit_pct}%**
     """
 )
 
@@ -121,7 +121,10 @@ def calculate_indicators(df):
     return df
 
 def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
-    """通用勝率計算函數"""
+    """
+    通用勝率計算函數
+    target_pct 會接收外部傳入的參數 (例如 0.20 代表 20%)
+    """
     try:
         start_idx = 60
         end_idx = len(df) - look_ahead_days 
@@ -133,6 +136,7 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
             if row['Close'] > row['MA20'] and row['RSI'] > 55:
                 total_signals += 1
                 entry_price = row['Close']
+                # 這裡使用動態傳入的 target_pct
                 target_price = entry_price * (1 + target_pct)
                 future_days = df.iloc[i+1 : i+1 + look_ahead_days]
                 max_price = future_days['High'].max()
@@ -162,7 +166,7 @@ if stock_list_df.empty:
 # --- 按鈕區塊 ---
 if st.button("🚀 啟動雙重勝率掃描"):
     
-    st.write(f"正在掃描... 同時計算停損(-{stop_loss_pct}%) 與 停利(+{take_profit_pct}%) 價格")
+    st.write(f"正在計算... 目標：{take_profit_pct}% 獲利機率")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -214,10 +218,14 @@ if st.button("🚀 啟動雙重勝率掃描"):
                     
                     if cond1 and cond2 and cond3 and cond4 and cond5:
                         stock_id = ticker.replace(".TW", "")
-                        win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=0.10)
-                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10)
                         
-                        # ★ 計算停損停利價
+                        # ★★★ 關鍵修改：將滑桿的 % 數除以 100 傳入 ★★★
+                        target_ratio = take_profit_pct / 100.0
+                        
+                        win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=target_ratio)
+                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=target_ratio)
+                        
+                        # 計算停損停利價
                         stop_loss_price = close * (1 - stop_loss_pct / 100)
                         take_profit_price = close * (1 + take_profit_pct / 100)
 
@@ -242,7 +250,7 @@ if st.button("🚀 啟動雙重勝率掃描"):
         res_df = pd.DataFrame(results)
         res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
         st.session_state['scan_results'] = res_df
-        st.success(f"掃描完成！共發現 {len(res_df)} 檔潛力股")
+        st.success(f"掃描完成！依據目標 {take_profit_pct}% 計算勝率")
     else:
         st.warning("今日無符合條件的股票。")
         st.session_state['scan_results'] = None
@@ -255,7 +263,8 @@ if st.session_state['scan_results'] is not None:
         is_high = s >= 50
         return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
 
-    st.markdown(f"#### 📊 掃描結果 (依據您的設定：停損 -{stop_loss_pct}% / 停利 +{take_profit_pct}%)")
+    # 標題現在會顯示動態的 % 數
+    st.markdown(f"#### 📊 掃描結果 (目標獲利：**{take_profit_pct}%** 的達成率)")
     
     st.dataframe(
         res_df.style.apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
@@ -294,7 +303,6 @@ if st.session_state['scan_results'] is not None:
             chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
             chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
             
-            # 取得該股票的收盤價，畫出停損停利線
             current_price = chart_data['Close'].iloc[-1]
             sl_line = current_price * (1 - stop_loss_pct / 100)
             tp_line = current_price * (1 + take_profit_pct / 100)
@@ -306,7 +314,6 @@ if st.session_state['scan_results'] is not None:
             fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA20'], line=dict(color='orange', width=1), name='MA20'))
             fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA60'], line=dict(color='green', width=1), name='MA60'))
             
-            # ★ 在圖上畫出停損停利線 (虛線)
             fig.add_hline(y=sl_line, line_dash="dash", line_color="red", annotation_text=f"停損 (-{stop_loss_pct}%)")
             fig.add_hline(y=tp_line, line_dash="dash", line_color="red", annotation_text=f"停利 (+{take_profit_pct}%)")
             
