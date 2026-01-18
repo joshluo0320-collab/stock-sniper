@@ -14,14 +14,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (回測版)",
+    page_title="Josh 的狙擊手戰情室 (雙重回測版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭排列 + 爆量 + RSI 強勢 + **歷史勝率分析**")
+st.markdown("### 專屬策略：多頭排列 + 爆量 + **5日/10日雙勝率回測**")
 
 # ==========================================
 # 2. 側邊欄：參數設定
@@ -41,7 +41,8 @@ st.sidebar.info(
     **📊 勝率分析定義**
     * **回測期間**：過去 1 年 (250個交易日)
     * **訊號定義**：當股價站上月線 + RSI強勢時
-    * **獲利目標**：10個交易日(半個月)內，最高價曾觸及 +10%
+    * **5日勝率**：5天內(極短線) 是否碰到 +10%
+    * **10日勝率**：10天內(波段) 是否碰到 +10%
     """
 )
 
@@ -94,48 +95,45 @@ def calculate_indicators(df):
     df['High60'] = df['Close'].rolling(window=60).max()
     return df
 
-def calculate_win_rate(df):
+def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
     """
-    計算歷史勝率：
-    過去一年內，當出現類似買點時，
-    10天內(半個月)是否曾達到 +10% 獲利?
+    通用勝率計算函數：
+    df: 股價資料
+    look_ahead_days: 往後看幾天 (5 或 10)
+    target_pct: 目標獲利 (0.10 代表 10%)
     """
     try:
-        # 為了避免資料不足，從第 60 天開始回測
         start_idx = 60
-        end_idx = len(df) - 10 # 最後10天因為還沒發生未來，無法驗證，所以扣掉
+        end_idx = len(df) - look_ahead_days 
         
         wins = 0
         total_signals = 0
         
-        # 掃描過去的每一天 (模擬歷史交易)
         for i in range(start_idx, end_idx):
             row = df.iloc[i]
             
-            # 簡易版進場條件 (模擬當初的強勢狀態)
-            # 條件：收盤 > MA20 且 RSI > 55 (代表趨勢轉強)
+            # 進場條件：站上月線且RSI轉強
             if row['Close'] > row['MA20'] and row['RSI'] > 55:
                 total_signals += 1
                 
-                # 檢查接下來 10 天的最高價
                 entry_price = row['Close']
-                target_price = entry_price * 1.10 # 目標 +10%
+                target_price = entry_price * (1 + target_pct)
                 
-                # 往後看 10 天
-                future_10_days = df.iloc[i+1 : i+11]
-                max_price = future_10_days['High'].max()
+                # 往後看 N 天的最高價
+                future_days = df.iloc[i+1 : i+1 + look_ahead_days]
+                max_price = future_days['High'].max()
                 
                 if max_price >= target_price:
                     wins += 1
         
         if total_signals == 0:
-            return "N/A" # 無訊號
+            return 0.0 # 若無訊號回傳 0 方便運算
             
         win_rate = (wins / total_signals) * 100
         return round(win_rate, 1)
         
     except Exception:
-        return "N/A"
+        return 0.0
 
 # ==========================================
 # 4. 主程式邏輯
@@ -147,16 +145,16 @@ with st.spinner("正在更新全台股票清單..."):
 if stock_list_df.empty:
     st.stop()
 
-if st.button("🚀 啟動全市場掃描 + 勝率回測"):
+if st.button("🚀 啟動雙重勝率掃描"):
     
-    st.write("正在掃描市場並進行歷史模擬，請耐心等候...")
+    st.write("正在進行雙重歷史模擬 (5日/10日)，運算量較大請稍候...")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     stock_map = dict(zip(stock_list_df['代號'], stock_list_df['名稱']))
     tickers = [f"{x}.TW" for x in stock_list_df['代號'].tolist()]
     
-    chunk_size = 30 # 調小批次量，避免記憶體不足
+    chunk_size = 30
     total = len(tickers)
     results = []
     
@@ -178,7 +176,7 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
                         df = data[ticker].copy()
                     
                     df = df.dropna(subset=['Close'])
-                    if len(df) < 100: continue # 資料太短不回測
+                    if len(df) < 100: continue
                     
                     df = calculate_indicators(df)
                     latest = df.iloc[-1]
@@ -192,7 +190,7 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
                     rsi = float(latest['RSI'])
                     high60 = float(latest['High60'])
                     
-                    # 篩選邏輯
+                    # 篩選條件
                     cond1 = (close > ma20) and (ma20 > ma60)
                     cond2 = vol >= min_volume
                     cond3 = vol > (vol_ma5 * vol_ratio)
@@ -202,8 +200,9 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
                     if cond1 and cond2 and cond3 and cond4 and cond5:
                         stock_id = ticker.replace(".TW", "")
                         
-                        # ★ 計算勝率 (只有入選的才算，節省時間)
-                        win_rate_10pct = calculate_win_rate(df)
+                        # ★ 計算兩種勝率
+                        win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=0.10)
+                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10)
                         
                         results.append({
                             "代號": stock_id,
@@ -211,7 +210,8 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
                             "收盤價": round(close, 2),
                             "RSI": round(rsi, 1),
                             "爆量倍數": round(vol/vol_ma5, 1) if vol_ma5 > 0 else 0,
-                            "🎯10日勝率%": win_rate_10pct  # 新增欄位
+                            "⚡5日勝率%": win_5d,
+                            "🎯10日勝率%": win_10d
                         })
                 except:
                     continue
@@ -222,19 +222,30 @@ if st.button("🚀 啟動全市場掃描 + 勝率回測"):
     if results:
         res_df = pd.DataFrame(results)
         
-        # 把 N/A 的勝率換成 -1 方便排序，顯示時再換回來
-        res_df['sort_win'] = pd.to_numeric(res_df['🎯10日勝率%'], errors='coerce').fillna(-1)
-        res_df = res_df.sort_values(by="sort_win", ascending=False).drop(columns=['sort_win'])
+        # 預設依照 5日勝率 排序
+        res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
         
         st.success(f"掃描完成！共發現 {len(res_df)} 檔潛力股")
-        st.dataframe(res_df, use_container_width=True)
         
-        # 存檔
+        # ★★★ 亮燈 Highlight 魔法 ★★★
+        # 定義樣式函數：如果 5日勝率 >= 50，背景亮黃色，字體加粗
+        def highlight_high_win_rate(s):
+            is_high = s >= 50
+            return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
+
+        # 套用樣式到 dataframe
+        st.dataframe(
+            res_df.style.apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
+                  .format({"⚡5日勝率%": "{:.1f}", "🎯10日勝率%": "{:.1f}"}),
+            use_container_width=True
+        )
+        
+        # 下載按鈕
         csv = res_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
-            label="📥 下載含勝率報表 CSV",
+            label="📥 下載雙勝率報表 CSV",
             data=csv,
-            file_name=f"sniper_winrate_{datetime.now().strftime('%Y%m%d')}.csv",
+            file_name=f"sniper_winrate_dual_{datetime.now().strftime('%Y%m%d')}.csv",
             mime='text/csv',
         )
         
