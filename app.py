@@ -6,6 +6,7 @@ import io
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import urllib3
+from plotly.subplots import make_subplots # 補上這行避免繪圖報錯
 
 # 忽略 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -14,14 +15,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (旗艦版)",
+    page_title="Josh 的狙擊手戰情室 (新手直觀版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭 + 爆量 + **MACD/KD 雙重確認**")
+st.markdown("### 專屬策略：多頭 + 爆量 + **直觀訊號解讀**")
 
 # ==========================================
 # 2. 側邊欄：參數與戰術看板
@@ -42,37 +43,29 @@ stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
 
 st.sidebar.markdown("---")
 
-# 進出場戰術看板 (整合 MACD/KD)
-with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True):
-    st.markdown(f"""
-    #### ✅ 進場前 3 大指標共振
-    1. **RSI (動能)**：55 ~ 85 (主力發動)。
-    2. **MACD (趨勢)**：紅柱 + 雙線黃金交叉 (趨勢向上)。
-    3. **KD (時機)**：K > D 且 K < 80 (好的進場點)。
+# 進出場戰術看板 (新手翻譯對照表)
+with st.sidebar.expander("📖 訊號翻譯蒟蒻 (新手必看)", expanded=True):
+    st.markdown("""
+    #### 🚦 乖離率 (買貴了嗎?)
+    * 🟢 **安全**：離月線不遠，風險低。
+    * 🟡 **略貴**：漲了一段，不要買太多。
+    * 🔴 **危險**：乖離過大，隨時會拉回！
     
-    #### ✅ 4 大濾網檢查
-    1. **位階**：近一年高點附近?
-    2. **乖離**：距月線 < 5%?
-    3. **籌碼/題材**：點連結確認。
+    #### ⚡ KD指標 (現在能買嗎?)
+    * 🚀 **起漲**：剛黃金交叉，肉最多。
+    * 🔥 **續攻**：趨勢正強，抱緊處理。
+    * ⚠️ **過熱**：有點漲過頭，隨時準備跑。
     
-    #### 🛑 出場準則
-    1. **停損**：虧損達 -{stop_loss_pct}% 或 跌破月線。
-    2. **停利**：獲利達 +{take_profit_pct}%。
-    3. **限時**：10天未發動出場。
+    #### 🏎️ MACD (油箱還有油嗎?)
+    * ⛽ **滿油**：趨勢剛翻多，動力充足。
+    * 🏎️ **加速**：多頭行駛中。
     """)
-    st.warning(f"⚠️ 紀律：嚴格執行停損停利！")
+    st.warning(f"⚠️ 紀律：虧損超過 {stop_loss_pct}% 務必執行停損！")
 
 st.sidebar.markdown("---")
-st.sidebar.info(
-    f"""
-    **📊 勝率分析定義**
-    * **回測期間**：過去 1 年
-    * **5日/10日勝率**：觸及 **+{take_profit_pct}%** 之機率
-    """
-)
 
 # ==========================================
-# 3. 核心函數 (新增 MACD 與 KD 計算)
+# 3. 核心函數
 # ==========================================
 
 @st.cache_data(ttl=86400)
@@ -101,13 +94,13 @@ def get_stock_data(tickers):
         return pd.DataFrame()
 
 def calculate_indicators(df):
-    """計算全套技術指標：MA, RSI, MACD, KD"""
-    # 1. MA & Volume
+    """計算全套技術指標"""
+    # MA & Vol
     df['MA20'] = df['Close'].rolling(window=ma_short).mean()
     df['MA60'] = df['Close'].rolling(window=ma_long).mean()
     df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
     
-    # 2. RSI
+    # RSI
     delta = df['Close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
@@ -116,29 +109,29 @@ def calculate_indicators(df):
     rs = ema_up / ema_down
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 3. MACD (12, 26, 9)
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD_DIF'] = exp1 - exp2
     df['MACD_DEA'] = df['MACD_DIF'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD_DIF'] - df['MACD_DEA']
+    # 判斷 MACD 前一天的狀態 (用來判斷是否剛轉正)
+    df['MACD_Hist_Prev'] = df['MACD_Hist'].shift(1)
     
-    # 4. KD (9, 3, 3)
+    # KD
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     df['RSV'] = (df['Close'] - low_min) / (high_max - low_min) * 100
-    # 修正：Pandas 計算 KD 遞迴比較慢，這裡用簡易平滑法
     df['K'] = df['RSV'].ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     
-    # 5. Highs for Position
+    # Highs
     df['High60'] = df['Close'].rolling(window=60).max()
     df['High250'] = df['Close'].rolling(window=250).max()
     
     return df
 
 def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
-    """通用勝率計算"""
     try:
         start_idx = 60
         end_idx = len(df) - look_ahead_days 
@@ -146,7 +139,6 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
         total_signals = 0
         for i in range(start_idx, end_idx):
             row = df.iloc[i]
-            # 歷史回測只用簡單條件 (RSI+均線) 避免過度擬合
             if row['Close'] > row['MA20'] and row['RSI'] > 55:
                 total_signals += 1
                 entry_price = row['Close']
@@ -175,9 +167,9 @@ if stock_list_df.empty:
     st.stop()
 
 # --- 按鈕區塊 ---
-if st.button("🚀 啟動旗艦掃描 (三指標共振)"):
+if st.button("🚀 啟動新手直觀掃描"):
     
-    st.write(f"正在掃描... MACD/KD 運算中...")
+    st.write(f"正在掃描並翻譯訊號，請稍候...")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -219,42 +211,57 @@ if st.button("🚀 啟動旗艦掃描 (三指標共振)"):
                     vol_ma5 = int(float(latest['Vol_MA5']) / 1000)
                     rsi = float(latest['RSI'])
                     
-                    # MACD & KD 取值
                     macd_hist = float(latest['MACD_Hist'])
+                    macd_hist_prev = float(latest['MACD_Hist_Prev'])
                     macd_dif = float(latest['MACD_DIF'])
                     macd_dea = float(latest['MACD_DEA'])
+                    
                     k_val = float(latest['K'])
                     d_val = float(latest['D'])
                     
                     high60 = float(latest['High60'])
                     high250 = float(latest['High250'])
                     
-                    # --- 篩選條件 (轉為嚴格模式) ---
-                    # 1. 均線多頭
+                    # --- 篩選 ---
                     cond_ma = (close > ma20) and (ma20 > ma60)
-                    # 2. 爆量
                     cond_vol = (vol >= min_volume) and (vol > (vol_ma5 * vol_ratio))
-                    # 3. RSI 強勢
                     cond_rsi = (rsi >= rsi_min) and (rsi <= rsi_max)
-                    # 4. 位階 (近高點)
                     cond_pos = close >= (high60 * 0.95)
-                    
-                    # ★ 5. MACD 多頭 (柱狀體紅 + 黃金交叉狀態)
                     cond_macd = (macd_hist > 0) and (macd_dif > macd_dea)
-                    
-                    # ★ 6. KD 偏多 (K>D 且不要過熱)
                     cond_kd = (k_val > d_val) and (k_val < 85)
                     
                     if cond_ma and cond_vol and cond_rsi and cond_pos and cond_macd and cond_kd:
                         stock_id = ticker.replace(".TW", "")
                         target_ratio = take_profit_pct / 100.0
                         win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=target_ratio)
-                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=target_ratio)
                         
-                        # 濾網指標
+                        # --- 新手翻譯邏輯 (將數字轉為直觀文字) ---
+                        
+                        # 1. 乖離率 (Bias)
                         bias_pct = ((close - ma20) / ma20) * 100
+                        if bias_pct > 10:
+                            bias_str = "🔴危險"
+                        elif bias_pct > 5:
+                            bias_str = "🟡略貴"
+                        else:
+                            bias_str = "🟢安全"
+                            
+                        # 2. KD 狀態
+                        if k_val > 80:
+                            kd_str = "⚠️過熱"
+                        elif k_val > 50:
+                            kd_str = "🔥續攻"
+                        else:
+                            kd_str = "🚀起漲"
+                            
+                        # 3. MACD 狀態
+                        # 如果昨天是綠柱或紅柱很短，今天是長紅 -> 滿油
+                        if macd_hist_prev <= 0 or (macd_hist > macd_hist_prev * 1.5):
+                            macd_str = "⛽滿油"
+                        else:
+                            macd_str = "🏎️加速"
+
                         position_score = (close / high250) * 100
-                        
                         stop_loss_price = close * (1 - stop_loss_pct / 100)
                         take_profit_price = close * (1 + take_profit_pct / 100)
                         yahoo_url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW"
@@ -263,11 +270,11 @@ if st.button("🚀 啟動旗艦掃描 (三指標共振)"):
                             "代號": stock_id,
                             "名稱": stock_map.get(stock_id, stock_id),
                             "收盤價": round(close, 2),
-                            "乖離率%": round(bias_pct, 1),
+                            "乖離狀況": f"{bias_str}({round(bias_pct,1)}%)",
+                            "KD狀態": kd_str,
+                            "MACD動能": macd_str,
                             "位階%": round(position_score, 1),
                             "⚡5日勝率%": win_5d,
-                            "MACD": "偏多", # 顯示給使用者看
-                            "KD": f"{int(k_val)}/{int(d_val)}",
                             "🛑停損": round(stop_loss_price, 2),
                             "🎯停利": round(take_profit_price, 2),
                             "🔍情報": yahoo_url
@@ -282,9 +289,9 @@ if st.button("🚀 啟動旗艦掃描 (三指標共振)"):
         res_df = pd.DataFrame(results)
         res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
         st.session_state['scan_results'] = res_df
-        st.success(f"掃描完成！共發現 {len(res_df)} 檔『三指標共振』強勢股。")
+        st.success(f"掃描完成！共發現 {len(res_df)} 檔『直觀訊號』強勢股。")
     else:
-        st.warning("今日無符合『嚴格條件』的股票，建議休息觀望。")
+        st.warning("今日無符合『嚴格條件』的股票。")
         st.session_state['scan_results'] = None
 
 # --- 顯示區塊 ---
@@ -295,21 +302,15 @@ if st.session_state['scan_results'] is not None:
         is_high = s >= 50
         return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
     
-    def highlight_high_risk(s):
-        is_risky = s > 5 
-        return ['color: #721c24; font-weight: bold; background-color: #f8d7da' if v else '' for v in is_risky]
-
-    st.markdown(f"#### 📊 旗艦掃描結果 (含 MACD / KD 確認)")
+    st.markdown(f"#### 📊 訊號掃描結果 (已自動翻譯指標)")
     
     st.dataframe(
         res_df.style
               .apply(highlight_high_win_rate, subset=['⚡5日勝率%'])
-              .apply(highlight_high_risk, subset=['乖離率%'])
               .format({
                   "收盤價": "{:.2f}",
                   "🛑停損": "{:.2f}",
                   "🎯停利": "{:.2f}",
-                  "乖離率%": "{:.1f}",
                   "位階%": "{:.1f}",
                   "⚡5日勝率%": "{:.1f}",
               }),
@@ -323,7 +324,7 @@ if st.session_state['scan_results'] is not None:
     )
     
     csv = res_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(label="📥 下載報表 CSV", data=csv, file_name=f"sniper_flagship_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
+    st.download_button(label="📥 下載報表 CSV", data=csv, file_name=f"sniper_easy_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
     
     st.markdown("---")
     st.subheader("📊 個股 K 線圖 (含 MACD)")
@@ -350,8 +351,7 @@ if st.session_state['scan_results'] is not None:
             sl_line = current_price * (1 - stop_loss_pct / 100)
             tp_line = current_price * (1 + take_profit_pct / 100)
             
-            # 建立子圖表 (上圖K線, 下圖MACD)
-            from plotly.subplots import make_subplots
+            # 建立子圖表
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                                 vertical_spacing=0.03, subplot_titles=(f'{selected_stock} K線圖', 'MACD'),
                                 row_width=[0.2, 0.7])
