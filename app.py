@@ -6,7 +6,7 @@ import io
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import urllib3
-from plotly.subplots import make_subplots # 補上這行避免繪圖報錯
+from plotly.subplots import make_subplots
 
 # 忽略 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -15,14 +15,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (新手直觀版)",
+    page_title="Josh 的狙擊手戰情室 (完全體版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭 + 爆量 + **直觀訊號解讀**")
+st.markdown("### 專屬策略：多頭 + 爆量 + **MACD/KD 直觀解讀**")
 
 # ==========================================
 # 2. 側邊欄：參數與戰術看板
@@ -43,9 +43,13 @@ stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
 
 st.sidebar.markdown("---")
 
-# 進出場戰術看板 (新手翻譯對照表)
+# 進出場戰術看板
 with st.sidebar.expander("📖 訊號翻譯蒟蒻 (新手必看)", expanded=True):
     st.markdown("""
+    #### ⛰️ 位階 (上方有壓力嗎?)
+    * **95%~100%**：萬里無雲，最好拉抬。
+    * **< 85%**：上方有套牢賣壓，需小心。
+
     #### 🚦 乖離率 (買貴了嗎?)
     * 🟢 **安全**：離月線不遠，風險低。
     * 🟡 **略貴**：漲了一段，不要買太多。
@@ -53,8 +57,8 @@ with st.sidebar.expander("📖 訊號翻譯蒟蒻 (新手必看)", expanded=True
     
     #### ⚡ KD指標 (現在能買嗎?)
     * 🚀 **起漲**：剛黃金交叉，肉最多。
-    * 🔥 **續攻**：趨勢正強，抱緊處理。
-    * ⚠️ **過熱**：有點漲過頭，隨時準備跑。
+    * 🔥 **續攻**：趨勢正強。
+    * ⚠️ **過熱**：有點漲過頭。
     
     #### 🏎️ MACD (油箱還有油嗎?)
     * ⛽ **滿油**：趨勢剛翻多，動力充足。
@@ -115,7 +119,6 @@ def calculate_indicators(df):
     df['MACD_DIF'] = exp1 - exp2
     df['MACD_DEA'] = df['MACD_DIF'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD_DIF'] - df['MACD_DEA']
-    # 判斷 MACD 前一天的狀態 (用來判斷是否剛轉正)
     df['MACD_Hist_Prev'] = df['MACD_Hist'].shift(1)
     
     # KD
@@ -125,7 +128,7 @@ def calculate_indicators(df):
     df['K'] = df['RSV'].ewm(com=2).mean()
     df['D'] = df['K'].ewm(com=2).mean()
     
-    # Highs
+    # Highs for Position (位階)
     df['High60'] = df['Close'].rolling(window=60).max()
     df['High250'] = df['Close'].rolling(window=250).max()
     
@@ -167,9 +170,9 @@ if stock_list_df.empty:
     st.stop()
 
 # --- 按鈕區塊 ---
-if st.button("🚀 啟動新手直觀掃描"):
+if st.button("🚀 啟動完整戰情掃描"):
     
-    st.write(f"正在掃描並翻譯訊號，請稍候...")
+    st.write(f"正在掃描：MACD/KD 訊號 + 雙勝率回測...")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -233,35 +236,30 @@ if st.button("🚀 啟動新手直觀掃描"):
                     if cond_ma and cond_vol and cond_rsi and cond_pos and cond_macd and cond_kd:
                         stock_id = ticker.replace(".TW", "")
                         target_ratio = take_profit_pct / 100.0
+                        
+                        # 雙勝率回測
                         win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=target_ratio)
+                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=target_ratio)
                         
-                        # --- 新手翻譯邏輯 (將數字轉為直觀文字) ---
-                        
-                        # 1. 乖離率 (Bias)
+                        # --- 新手翻譯邏輯 ---
+                        # 1. 乖離率
                         bias_pct = ((close - ma20) / ma20) * 100
-                        if bias_pct > 10:
-                            bias_str = "🔴危險"
-                        elif bias_pct > 5:
-                            bias_str = "🟡略貴"
-                        else:
-                            bias_str = "🟢安全"
+                        if bias_pct > 10: bias_str = "🔴危險"
+                        elif bias_pct > 5: bias_str = "🟡略貴"
+                        else: bias_str = "🟢安全"
                             
                         # 2. KD 狀態
-                        if k_val > 80:
-                            kd_str = "⚠️過熱"
-                        elif k_val > 50:
-                            kd_str = "🔥續攻"
-                        else:
-                            kd_str = "🚀起漲"
+                        if k_val > 80: kd_str = "⚠️過熱"
+                        elif k_val > 50: kd_str = "🔥續攻"
+                        else: kd_str = "🚀起漲"
                             
                         # 3. MACD 狀態
-                        # 如果昨天是綠柱或紅柱很短，今天是長紅 -> 滿油
-                        if macd_hist_prev <= 0 or (macd_hist > macd_hist_prev * 1.5):
-                            macd_str = "⛽滿油"
-                        else:
-                            macd_str = "🏎️加速"
+                        if macd_hist_prev <= 0 or (macd_hist > macd_hist_prev * 1.5): macd_str = "⛽滿油"
+                        else: macd_str = "🏎️加速"
 
+                        # 4. 位階分數
                         position_score = (close / high250) * 100
+                        
                         stop_loss_price = close * (1 - stop_loss_pct / 100)
                         take_profit_price = close * (1 + take_profit_pct / 100)
                         yahoo_url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW"
@@ -275,6 +273,7 @@ if st.button("🚀 啟動新手直觀掃描"):
                             "MACD動能": macd_str,
                             "位階%": round(position_score, 1),
                             "⚡5日勝率%": win_5d,
+                            "🎯10日勝率%": win_10d, # ★★★ 10日勝率回來了！
                             "🛑停損": round(stop_loss_price, 2),
                             "🎯停利": round(take_profit_price, 2),
                             "🔍情報": yahoo_url
@@ -289,7 +288,7 @@ if st.button("🚀 啟動新手直觀掃描"):
         res_df = pd.DataFrame(results)
         res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
         st.session_state['scan_results'] = res_df
-        st.success(f"掃描完成！共發現 {len(res_df)} 檔『直觀訊號』強勢股。")
+        st.success(f"掃描完成！發現 {len(res_df)} 檔潛力股。")
     else:
         st.warning("今日無符合『嚴格條件』的股票。")
         st.session_state['scan_results'] = None
@@ -302,17 +301,18 @@ if st.session_state['scan_results'] is not None:
         is_high = s >= 50
         return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
     
-    st.markdown(f"#### 📊 訊號掃描結果 (已自動翻譯指標)")
+    st.markdown(f"#### 📊 訊號掃描結果 (含雙勝率)")
     
     st.dataframe(
         res_df.style
-              .apply(highlight_high_win_rate, subset=['⚡5日勝率%'])
+              .apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
               .format({
                   "收盤價": "{:.2f}",
                   "🛑停損": "{:.2f}",
                   "🎯停利": "{:.2f}",
                   "位階%": "{:.1f}",
                   "⚡5日勝率%": "{:.1f}",
+                  "🎯10日勝率%": "{:.1f}", # ★★★ 這裡也補上了
               }),
         column_config={
             "🔍情報": st.column_config.LinkColumn(
@@ -324,7 +324,7 @@ if st.session_state['scan_results'] is not None:
     )
     
     csv = res_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(label="📥 下載報表 CSV", data=csv, file_name=f"sniper_easy_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
+    st.download_button(label="📥 下載完整報表 CSV", data=csv, file_name=f"sniper_complete_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
     
     st.markdown("---")
     st.subheader("📊 個股 K 線圖 (含 MACD)")
@@ -338,7 +338,7 @@ if st.session_state['scan_results'] is not None:
             if isinstance(chart_data.columns, pd.MultiIndex):
                 chart_data.columns = chart_data.columns.get_level_values(0)
             
-            # 補算指標畫圖用
+            # 補算指標
             chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
             chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
             exp1 = chart_data['Close'].ewm(span=12, adjust=False).mean()
