@@ -14,14 +14,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (全連動版)",
+    page_title="Josh 的狙擊手戰情室 (4大濾網版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：多頭排列 + 爆量 + **動態勝率連動**")
+st.markdown("### 專屬策略：技術篩選 + **4大濾網輔助 (籌碼/題材/位階/乖離)**")
 
 # ==========================================
 # 2. 側邊欄：參數與戰術看板
@@ -36,38 +36,34 @@ ma_short = st.sidebar.number_input("短期均線 (MA)", value=20)
 ma_long = st.sidebar.number_input("長期均線 (MA)", value=60)
 
 st.sidebar.markdown("---")
-st.sidebar.header("💰 風險與目標設定 (連動勝率)")
-# 這裡設定的 % 數，現在會直接影響勝率計算！
+st.sidebar.header("💰 風險與目標設定")
 take_profit_pct = st.sidebar.slider("🎯 預期獲利目標 (%)", 5, 30, 10, 1)
 stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
 
 st.sidebar.markdown("---")
 
-# 進出場戰術看板
+# 進出場戰術看板 (整合 4 大濾網提醒)
 with st.sidebar.expander("⚔️ 狙擊手進出場戰術 (SOP)", expanded=True):
     st.markdown(f"""
-    #### ✅ 進場檢查 (Entry)
-    1. **趨勢**：多頭排列 (股價 > 月 > 季)。
-    2. **動能**：RSI 在 55~85。
-    3. **籌碼**：爆量 > 1.2倍均量。
+    #### ✅ 進場前 4 大濾網檢查
+    1. **位階 (Visual)**：是否接近一年高點？(上方無壓)。
+    2. **乖離 (Risk)**：距月線是否 < 5%？(太遠不要追)。
+    3. **籌碼 (Chips)**：點擊連結，確認投信/外資買超。
+    4. **題材 (Story)**：點擊連結，確認有營收或新聞。
     
     #### 🛑 出場準則 (Exit)
-    1. **停損 (防守)**：
-       - **虧損達 -{stop_loss_pct}%** ➜ **強制離場**。
-       - 或 **跌破月線**。
-    2. **停利 (進攻)**：
-       - **獲利達 +{take_profit_pct}%** ➜ 分批獲利。
-       - 或 **RSI > 85** (過熱)。
+    1. **停損**：虧損達 -{stop_loss_pct}% 或 跌破月線。
+    2. **停利**：獲利達 +{take_profit_pct}% 或 RSI > 85。
+    3. **限時**：10天未發動，資金回收。
     """)
     st.warning(f"⚠️ 紀律：虧損不可超過 {stop_loss_pct}%！")
 
 st.sidebar.markdown("---")
 st.sidebar.info(
     f"""
-    **📊 動態勝率定義 (隨滑桿變動)**
+    **📊 動態勝率定義**
     * **回測期間**：過去 1 年
-    * **5日勝率**：5天內是否觸及 **+{take_profit_pct}%**
-    * **10日勝率**：10天內是否觸及 **+{take_profit_pct}%**
+    * **5日/10日勝率**：觸及 **+{take_profit_pct}%** 之機率
     """
 )
 
@@ -103,7 +99,7 @@ def get_stock_data(tickers):
         return pd.DataFrame()
 
 def calculate_indicators(df):
-    """計算技術指標"""
+    """計算技術指標 (新增 YearHigh)"""
     df['MA20'] = df['Close'].rolling(window=ma_short).mean()
     df['MA60'] = df['Close'].rolling(window=ma_long).mean()
     df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
@@ -117,32 +113,28 @@ def calculate_indicators(df):
     rs = ema_up / ema_down
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # 新增：250天(一年)最高價，用來判斷位階
     df['High60'] = df['Close'].rolling(window=60).max()
+    df['High250'] = df['Close'].rolling(window=250).max()
     return df
 
 def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
-    """
-    通用勝率計算函數
-    target_pct 會接收外部傳入的參數 (例如 0.20 代表 20%)
-    """
+    """通用勝率計算函數"""
     try:
         start_idx = 60
         end_idx = len(df) - look_ahead_days 
         wins = 0
         total_signals = 0
-        
         for i in range(start_idx, end_idx):
             row = df.iloc[i]
             if row['Close'] > row['MA20'] and row['RSI'] > 55:
                 total_signals += 1
                 entry_price = row['Close']
-                # 這裡使用動態傳入的 target_pct
                 target_price = entry_price * (1 + target_pct)
                 future_days = df.iloc[i+1 : i+1 + look_ahead_days]
                 max_price = future_days['High'].max()
                 if max_price >= target_price:
                     wins += 1
-        
         if total_signals == 0: return 0.0 
         win_rate = (wins / total_signals) * 100
         return round(win_rate, 2)
@@ -153,7 +145,6 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
 # 4. 主程式邏輯
 # ==========================================
 
-# 初始化 session_state
 if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = None
 
@@ -164,9 +155,9 @@ if stock_list_df.empty:
     st.stop()
 
 # --- 按鈕區塊 ---
-if st.button("🚀 啟動雙重勝率掃描"):
+if st.button("🚀 啟動狙擊掃描 (含4大濾網)"):
     
-    st.write(f"正在計算... 目標：{take_profit_pct}% 獲利機率")
+    st.write(f"正在掃描... 計算技術面與風險位階...")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -195,7 +186,7 @@ if st.button("🚀 啟動雙重勝率掃描"):
                         df = data[ticker].copy()
                     
                     df = df.dropna(subset=['Close'])
-                    if len(df) < 100: continue
+                    if len(df) < 250: continue # 需250天資料算年高
                     
                     df = calculate_indicators(df)
                     latest = df.iloc[-1]
@@ -208,6 +199,7 @@ if st.button("🚀 啟動雙重勝率掃描"):
                     vol_ma5 = int(float(latest['Vol_MA5']) / 1000)
                     rsi = float(latest['RSI'])
                     high60 = float(latest['High60'])
+                    high250 = float(latest['High250']) # 一年高點
                     
                     # 篩選條件
                     cond1 = (close > ma20) and (ma20 > ma60)
@@ -218,27 +210,38 @@ if st.button("🚀 啟動雙重勝率掃描"):
                     
                     if cond1 and cond2 and cond3 and cond4 and cond5:
                         stock_id = ticker.replace(".TW", "")
-                        
-                        # ★★★ 關鍵修改：將滑桿的 % 數除以 100 傳入 ★★★
                         target_ratio = take_profit_pct / 100.0
-                        
                         win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=target_ratio)
                         win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=target_ratio)
                         
-                        # 計算停損停利價
+                        # ★ 計算濾網指標 ★
+                        
+                        # 1. 乖離率 (Bias): 距月線多遠? (盈虧比濾網)
+                        bias_pct = ((close - ma20) / ma20) * 100
+                        
+                        # 2. 一年位階 (Position): 離一年高點多近? (左側壓力濾網)
+                        # 越接近 100% 代表越無壓力
+                        position_score = (close / high250) * 100
+                        
                         stop_loss_price = close * (1 - stop_loss_pct / 100)
                         take_profit_price = close * (1 + take_profit_pct / 100)
+                        
+                        # Yahoo 股市連結 (籌碼/題材濾網)
+                        yahoo_url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW"
 
                         results.append({
                             "代號": stock_id,
                             "名稱": stock_map.get(stock_id, stock_id),
                             "收盤價": round(close, 2),
-                            "🛑停損價": round(stop_loss_price, 2),
-                            "🎯停利價": round(take_profit_price, 2),
-                            "RSI": round(rsi, 2),
-                            "爆量倍數": round(vol/vol_ma5, 2) if vol_ma5 > 0 else 0,
+                            "乖離率%": round(bias_pct, 1), # 濾網 4: 盈虧比
+                            "位階%": round(position_score, 1), # 濾網 1: 壓力位
                             "⚡5日勝率%": win_5d,
-                            "🎯10日勝率%": win_10d
+                            "🎯10日勝率%": win_10d,
+                            "RSI": round(rsi, 1),
+                            "爆量": round(vol/vol_ma5, 1) if vol_ma5 > 0 else 0,
+                            "🛑停損": round(stop_loss_price, 2),
+                            "🎯停利": round(take_profit_price, 2),
+                            "🔍情報": yahoo_url # 濾網 2&3: 籌碼與題材
                         })
                 except:
                     continue
@@ -250,7 +253,7 @@ if st.button("🚀 啟動雙重勝率掃描"):
         res_df = pd.DataFrame(results)
         res_df = res_df.sort_values(by="⚡5日勝率%", ascending=False)
         st.session_state['scan_results'] = res_df
-        st.success(f"掃描完成！依據目標 {take_profit_pct}% 計算勝率")
+        st.success(f"掃描完成！發現 {len(res_df)} 檔，請檢查濾網指標。")
     else:
         st.warning("今日無符合條件的股票。")
         st.session_state['scan_results'] = None
@@ -259,34 +262,47 @@ if st.button("🚀 啟動雙重勝率掃描"):
 if st.session_state['scan_results'] is not None:
     res_df = st.session_state['scan_results']
     
+    # 樣式設定
     def highlight_high_win_rate(s):
         is_high = s >= 50
         return ['background-color: #d4edda; color: #155724; font-weight: bold' if v else '' for v in is_high]
-
-    # 標題現在會顯示動態的 % 數
-    st.markdown(f"#### 📊 掃描結果 (目標獲利：**{take_profit_pct}%** 的達成率)")
     
+    # 乖離率過高(風險大) 亮紅字
+    def highlight_high_risk(s):
+        is_risky = s > 5 # 假設乖離 > 5% 風險增加
+        return ['color: #721c24; font-weight: bold; background-color: #f8d7da' if v else '' for v in is_risky]
+
+    st.markdown(f"#### 📊 狙擊清單 (點擊『🔍情報』連結查看籌碼與新聞)")
+    
+    # 使用 column_config 設定連結與格式
     st.dataframe(
-        res_df.style.apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
+        res_df.style
+              .apply(highlight_high_win_rate, subset=['⚡5日勝率%', '🎯10日勝率%'])
+              .apply(highlight_high_risk, subset=['乖離率%'])
               .format({
                   "收盤價": "{:.2f}",
-                  "🛑停損價": "{:.2f}",
-                  "🎯停利價": "{:.2f}",
-                  "RSI": "{:.2f}",
-                  "爆量倍數": "{:.2f}",
-                  "⚡5日勝率%": "{:.2f}",
-                  "🎯10日勝率%": "{:.2f}"
+                  "🛑停損": "{:.2f}",
+                  "🎯停利": "{:.2f}",
+                  "乖離率%": "{:.1f}",
+                  "位階%": "{:.1f}",
+                  "RSI": "{:.1f}",
+                  "爆量": "{:.1f}",
+                  "⚡5日勝率%": "{:.1f}",
+                  "🎯10日勝率%": "{:.1f}"
               }),
+        column_config={
+            "🔍情報": st.column_config.LinkColumn(
+                "🔍 籌碼/題材", 
+                help="點擊前往 Yahoo 股市查看法人買賣與最新新聞",
+                validate="^https://",
+                display_text="查看情報"
+            )
+        },
         use_container_width=True
     )
     
     csv = res_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 下載報表 (含停損停利價) CSV",
-        data=csv,
-        file_name=f"sniper_report_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime='text/csv',
-    )
+    st.download_button(label="📥 下載報表 CSV", data=csv, file_name=f"sniper_full_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
     
     st.markdown("---")
     st.subheader("📊 個股 K 線圖檢視")
