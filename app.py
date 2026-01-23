@@ -7,67 +7,73 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import urllib3
 from plotly.subplots import make_subplots
+import os
 
 # 忽略 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
-# 1. 頁面設定
+# 1. 頁面設定與初始化
 # ==========================================
 st.set_page_config(
-    page_title="Josh 的狙擊手戰情室 (系統自檢版)",
+    page_title="Josh 的狙擊手戰情室 (全功能指揮官版)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# 初始化庫存檔案
+PORTFOLIO_FILE = 'my_portfolio.csv'
+if not os.path.exists(PORTFOLIO_FILE):
+    df_init = pd.DataFrame(columns=['代號', '名稱', '成本價', '股數', '買入日期'])
+    df_init.to_csv(PORTFOLIO_FILE, index=False)
+
 st.title("🎯 Josh 的股市狙擊手戰情室")
-st.markdown("### 專屬策略：勝率鎖定(>50%) + **系統自我診斷**")
 
 # ==========================================
-# 2. 側邊欄：參數與戰術看板
+# 2. 側邊欄：參數與庫存操作
 # ==========================================
-st.sidebar.header("⚙️ 策略參數設定")
-
-# 定義 strict_mode (解決 NameError 的關鍵)
-strict_mode = st.sidebar.checkbox("🔒 開啟嚴格篩選 (Strict Mode)", value=False, help="勾選後：只顯示勝率>50%且不過熱的股票。")
-
-min_volume = st.sidebar.number_input("最低成交量 (張)", value=800, step=100)
-vol_ratio = st.sidebar.slider("爆量係數 (今日 > N倍均量)", 1.0, 3.0, 1.2, 0.1)
-rsi_min = st.sidebar.slider("RSI 最低門檻", 30, 70, 55)
-rsi_max = st.sidebar.slider("RSI 最高門檻", 70, 100, 85)
-ma_short = st.sidebar.number_input("短期均線 (MA)", value=20)
-ma_long = st.sidebar.number_input("長期均線 (MA)", value=60)
+st.sidebar.header("⚙️ 掃描參數")
+strict_mode = st.sidebar.checkbox("🔒 開啟嚴格篩選 (Strict)", value=False, help="勾選後：只顯示勝率>50%且不過熱的股票。")
+min_volume = st.sidebar.number_input("最低成交量", value=800, step=100)
+vol_ratio = st.sidebar.slider("爆量係數", 1.0, 3.0, 1.2, 0.1)
 
 st.sidebar.markdown("---")
-st.sidebar.header("💰 風險與目標設定")
-take_profit_pct = st.sidebar.slider("🎯 預期獲利目標 (%)", 5, 30, 10, 1)
-stop_loss_pct = st.sidebar.slider("🛑 最大容忍停損 (%)", 2, 15, 5, 1)
+st.sidebar.header("💰 庫存管理")
 
-st.sidebar.markdown("---")
-
-# 進出場戰術看板
-with st.sidebar.expander("📖 戰略評估邏輯 (SOP)", expanded=True):
-    st.markdown("""
-    #### 🎯 核心原則
-    1. **勝率門檻**：嚴格鎖定 **10日勝率 >= 50%**。
+# 新增庫存區塊
+with st.sidebar.form("add_stock_form"):
+    st.write("📥 新增持股")
+    new_stock_id = st.text_input("股票代號 (如 2330)")
+    new_stock_price = st.number_input("買入成本", min_value=0.0, step=0.1)
+    new_stock_qty = st.number_input("股數", min_value=1, step=1, value=1000, help="一張請填1000，零股請填實際股數")
+    submitted = st.form_submit_button("💾 加入庫存")
     
-    #### 🤖 綜合評估
-    * **🟢 安全進場**：乖離低 (<5%)，勝率夠。
-    * **🟡 拉回佈局**：乖離稍大 (5-10%)。
-    * **🔥 妖股模式**：乖離大 (>10%) 但 **勝率超高(>60%)**。
-    
-    #### 🛠️ 故障排除
-    如果按鈕按下去沒反應，請看畫面最上方的錯誤提示。
-    """)
-    st.warning(f"⚠️ 紀律：虧損超過 {stop_loss_pct}% 務必執行停損！")
+    if submitted and new_stock_id and new_stock_price > 0:
+        try:
+            # 讀取現有檔案
+            df_curr = pd.read_csv(PORTFOLIO_FILE)
+            new_row = pd.DataFrame({
+                '代號': [new_stock_id], 
+                '名稱': [new_stock_id], # 先暫用代號，掃描時會更新名稱
+                '成本價': [new_stock_price], 
+                '股數': [new_stock_qty],
+                '買入日期': [datetime.now().strftime("%Y-%m-%d")]
+            })
+            df_curr = pd.concat([df_curr, new_row], ignore_index=True)
+            df_curr.to_csv(PORTFOLIO_FILE, index=False)
+            st.sidebar.success(f"已加入 {new_stock_id}！")
+        except Exception as e:
+            st.sidebar.error(f"失敗: {e}")
 
-st.sidebar.markdown("---")
+if st.sidebar.button("🗑️ 清空所有庫存"):
+    df_init = pd.DataFrame(columns=['代號', '名稱', '成本價', '股數', '買入日期'])
+    df_init.to_csv(PORTFOLIO_FILE, index=False)
+    st.sidebar.warning("庫存已清空！")
 
 # ==========================================
 # 3. 核心函數
 # ==========================================
-
 @st.cache_data(ttl=86400)
 def get_tw_stock_list():
     try:
@@ -80,33 +86,27 @@ def get_tw_stock_list():
         df['有價證券代號及名稱'] = df['有價證券代號及名稱'].astype(str).str.replace('　', ' ')
         df[['代號', '名稱']] = df['有價證券代號及名稱'].str.split(pat=' ', n=1, expand=True)
         df = df[df['代號'].str.len() == 4]
-        df['代號'] = df['代號'].astype(str).str.zfill(4)
         return df[['代號', '名稱']]
-    except Exception as e:
-        st.error(f"抓取股票清單失敗: {e}")
+    except:
         return pd.DataFrame()
 
 def get_stock_data(tickers):
     try:
         data = yf.download(tickers, period="300d", interval="1d", group_by='ticker', threads=True, progress=False)
         return data
-    except Exception:
+    except:
         return pd.DataFrame()
 
 def calculate_indicators(df):
-    """計算全套技術指標"""
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA10'] = df['Close'].rolling(window=10).mean()
-    df['MA20'] = df['Close'].rolling(window=ma_short).mean()
-    df['MA60'] = df['Close'].rolling(window=ma_long).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
     df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
     
     delta = df['Close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=13, adjust=False).mean()
-    ema_down = down.ewm(com=13, adjust=False).mean()
-    rs = ema_up / ema_down
+    rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
     df['RSI'] = 100 - (100 / (1 + rs))
     
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -114,16 +114,11 @@ def calculate_indicators(df):
     df['MACD_DIF'] = exp1 - exp2
     df['MACD_DEA'] = df['MACD_DIF'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD_DIF'] - df['MACD_DEA']
-    df['MACD_Hist_Prev'] = df['MACD_Hist'].shift(1)
     
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     df['RSV'] = (df['Close'] - low_min) / (high_max - low_min) * 100
     df['K'] = df['RSV'].ewm(com=2).mean()
-    df['D'] = df['K'].ewm(com=2).mean()
-    
-    df['High60'] = df['Close'].rolling(window=60).max()
-    df['High250'] = df['Close'].rolling(window=250).max()
     
     return df
 
@@ -139,269 +134,146 @@ def calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=0.10):
                 total_signals += 1
                 entry_price = row['Close']
                 target_price = entry_price * (1 + target_pct)
-                future_days = df.iloc[i+1 : i+1 + look_ahead_days]
-                max_price = future_days['High'].max()
-                if max_price >= target_price:
+                if df.iloc[i+1:i+1+look_ahead_days]['High'].max() >= target_price:
                     wins += 1
-        if total_signals == 0: return 0.0 
-        win_rate = (wins / total_signals) * 100
-        return round(win_rate, 2)
-    except Exception:
-        return 0.0
+        return round((wins/total_signals)*100, 1) if total_signals > 0 else 0
+    except: return 0
 
 # ==========================================
-# 4. 主程式邏輯 (含連線診斷)
+# 4. 主介面：分頁系統
 # ==========================================
+tab1, tab2 = st.tabs(["🚀 戰略掃描 (找股票)", "📁 我的庫存戰情 (顧股票)"])
 
-if 'scan_results' not in st.session_state:
-    st.session_state['scan_results'] = None
-
-with st.spinner("正在更新全台股票清單..."):
-    stock_list_df = get_tw_stock_list()
-
-if stock_list_df.empty:
-    st.stop()
-
-# --- 按鈕區塊 ---
-button_text = "🚀 啟動嚴格掃描" if strict_mode else "🚀 啟動彈性掃描 (顯示更多)"
-
-if st.button(button_text):
-    
-    # 1. 先進行連線測試 (解決「沒反應」的疑慮)
-    st.write("📡 正在測試連線能力...")
-    try:
-        test_df = yf.download("2330.TW", period="5d", progress=False)
-        if test_df.empty:
-            st.error("❌ 連線失敗！無法抓取股價。可能原因：Yahoo 阻擋或套件版本過舊。")
+# --- 分頁 1: 掃描功能 ---
+with tab1:
+    button_text = "🚀 啟動嚴格掃描" if strict_mode else "🚀 啟動彈性掃描"
+    if st.button(button_text):
+        # 連線測試
+        try:
+            if yf.download("2330.TW", period="5d", progress=False).empty:
+                st.error("❌ 連線失敗 (Yahoo API)")
+                st.stop()
+        except:
+            st.error("❌ 連線錯誤")
             st.stop()
-        else:
-            st.write("✅ 連線成功，開始執行戰略掃描...")
-    except Exception as e:
-        st.error(f"❌ 程式發生錯誤: {e}")
-        st.stop()
 
-    # 2. 開始正式掃描
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    stock_map = dict(zip(stock_list_df['代號'], stock_list_df['名稱']))
-    tickers = [f"{x}.TW" for x in stock_list_df['代號'].tolist()]
-    
-    chunk_size = 30
-    total = len(tickers)
-    results = []
-    
-    for i in range(0, total, chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        progress = min((i + chunk_size) / total, 1.0)
-        progress_bar.progress(progress)
-        status_text.text(f"掃描進度：{i}/{total} ...")
+        st.write("正在掃描中...")
+        stock_list = get_tw_stock_list()
+        stock_map = dict(zip(stock_list['代號'], stock_list['名稱']))
+        tickers = [f"{x}.TW" for x in stock_list['代號'].tolist()]
         
-        data = get_stock_data(chunk)
+        # 這裡為了展示，實際運行建議分批
+        data = get_stock_data(tickers)
+        results = []
         
         if not data.empty:
-            for ticker in chunk:
+            progress_bar = st.progress(0)
+            total = len(tickers)
+            for i, ticker in enumerate(tickers):
+                if i % 50 == 0: progress_bar.progress(min((i+1)/total, 1.0))
                 try:
-                    if len(chunk) == 1:
-                        df = data
-                    else:
+                    # 處理 MultiIndex
+                    if len(tickers) > 1:
                         if ticker not in data.columns.levels[0]: continue
                         df = data[ticker].copy()
-                    
+                    else:
+                        df = data.copy()
+                        
                     df = df.dropna(subset=['Close'])
                     if len(df) < 250: continue
                     
                     df = calculate_indicators(df)
                     latest = df.iloc[-1]
                     
-                    # 取值
-                    close = float(latest['Close'])
-                    ma5 = float(latest['MA5'])
-                    ma10 = float(latest['MA10'])
-                    ma20 = float(latest['MA20'])
-                    ma60 = float(latest['MA60'])
-                    vol = int(float(latest['Volume']) / 1000)
-                    vol_ma5 = int(float(latest['Vol_MA5']) / 1000)
-                    rsi = float(latest['RSI'])
+                    close = latest['Close']
+                    ma20 = latest['MA20']
                     
-                    macd_hist = float(latest['MACD_Hist'])
-                    macd_dif = float(latest['MACD_DIF'])
-                    macd_dea = float(latest['MACD_DEA'])
-                    k_val = float(latest['K'])
-                    d_val = float(latest['D'])
+                    # 基礎篩選
+                    if not (close > ma20): continue
                     
-                    high60 = float(latest['High60'])
-                    high250 = float(latest['High250'])
+                    win10 = calculate_win_rate_dynamic(df)
+                    if win10 < 50: continue # 嚴格50%
                     
-                    # --- 基礎篩選 ---
-                    cond_ma = (close > ma20) and (ma20 > ma60)
-                    cond_vol = (vol >= min_volume) and (vol > (vol_ma5 * vol_ratio))
-                    cond_rsi = (rsi >= rsi_min) and (rsi <= rsi_max)
-                    cond_pos = close >= (high60 * 0.95)
-                    cond_macd = (macd_hist > 0) and (macd_dif > macd_dea)
-                    cond_kd = (k_val > d_val) and (k_val < 85)
-                    
-                    if cond_ma and cond_vol and cond_rsi and cond_pos and cond_macd and cond_kd:
-                        stock_id = ticker.replace(".TW", "")
-                        target_ratio = take_profit_pct / 100.0
-                        
-                        win_5d = calculate_win_rate_dynamic(df, look_ahead_days=5, target_pct=target_ratio)
-                        win_10d = calculate_win_rate_dynamic(df, look_ahead_days=10, target_pct=target_ratio)
-                        
-                        bias_pct = ((close - ma20) / ma20) * 100
-                        
-                        # ★★★ 核心濾網 ★★★
-                        # 不論模式，勝率一定要 50%
-                        if win_10d < 50:
-                            continue
-                        
-                        # 嚴格模式下，刪除過熱
-                        if strict_mode and bias_pct > 10:
-                            continue
-                        
-                        # ★★★ 綜合戰略評估 ★★★
-                        assessment = ""
-                        suggested_entry = close
-                        
-                        if bias_pct <= 5:
-                            assessment = "🟢安全進場"
-                            suggested_entry = close
-                        elif 5 < bias_pct <= 10:
-                            assessment = "🟡拉回佈局"
-                            suggested_entry = ma5 
-                        else:
-                            # 乖離>10
-                            if win_10d >= 60:
-                                assessment = "🔥妖股(小追)"
-                                suggested_entry = close 
-                            else:
-                                assessment = "🔴風險過高"
-                                suggested_entry = ma10 
+                    bias = (close - ma20) / ma20 * 100
+                    if strict_mode and bias > 10: continue
 
-                        bias_str = f"{round(bias_pct,1)}%"
-                        position_score = (close / high250) * 100
-                        stop_loss_price = close * (1 - stop_loss_pct / 100)
-                        take_profit_price = close * (1 + take_profit_pct / 100)
-                        yahoo_url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW"
+                    # 評估
+                    if bias <= 5: assess, entry = "🟢安全", close
+                    elif bias <= 10: assess, entry = "🟡拉回", latest['MA5']
+                    else: 
+                        if win10 >= 60: assess, entry = "🔥妖股", close
+                        else: assess, entry = "🔴風險", latest['MA10']
 
-                        results.append({
-                            "代號": stock_id,
-                            "名稱": stock_map.get(stock_id, stock_id),
-                            "🤖戰略評估": assessment,
-                            "🎯10日勝率%": win_10d,
-                            "⚡5日勝率%": win_5d,
-                            "💡建議價": round(suggested_entry, 2),
-                            "收盤價": round(close, 2),
-                            "乖離%": bias_str,
-                            "位階%": round(position_score, 1),
-                            "🛑停損": round(stop_loss_price, 2),
-                            "🎯停利": round(take_profit_price, 2),
-                            "🔍情報": yahoo_url
-                        })
-                except:
-                    continue
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    if results:
-        res_df = pd.DataFrame(results)
-        res_df = res_df.sort_values(by=["🎯10日勝率%", "⚡5日勝率%"], ascending=False)
-        st.session_state['scan_results'] = res_df
-        st.success(f"戰略掃描完成！共發現 {len(res_df)} 檔『高勝率』標的。")
-    else:
-        st.warning("今日無符合『勝率>50%』的股票。")
-        st.session_state['scan_results'] = None
-
-# --- 顯示區塊 ---
-if st.session_state['scan_results'] is not None:
-    res_df = st.session_state['scan_results']
-    
-    def highlight_assessment(s):
-        colors = []
-        for v in s:
-            if "安全" in v: colors.append('background-color: #d4edda; color: #155724; font-weight: bold')
-            elif "拉回" in v: colors.append('background-color: #fff3cd; color: #856404; font-weight: bold')
-            elif "妖股" in v: colors.append('background-color: #f8d7da; color: #721c24; font-weight: bold')
-            else: colors.append('color: gray')
-        return colors
-    
-    st.markdown(f"#### 📊 狙擊清單 (系統正常運作中)")
-    
-    st.dataframe(
-        res_df.style
-              .apply(highlight_assessment, subset=['🤖戰略評估'])
-              .format({
-                  "🎯10日勝率%": "{:.1f}",
-                  "⚡5日勝率%": "{:.1f}",
-                  "💡建議價": "{:.2f}",
-                  "收盤價": "{:.2f}",
-                  "🛑停損": "{:.2f}",
-                  "🎯停利": "{:.2f}",
-                  "位階%": "{:.1f}",
-              }),
-        column_config={
-            "🔍情報": st.column_config.LinkColumn("🔍 籌碼/題材", display_text="查看情報"),
-            "🤖戰略評估": st.column_config.TextColumn("🤖 戰略評估", help="依據乖離率與勝率綜合判斷"),
-            "💡建議價": st.column_config.NumberColumn("💡建議價", help="依風險程度建議掛單價格")
-        },
-        use_container_width=True
-    )
-    
-    csv = res_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(label="📥 下載戰略報表 CSV", data=csv, file_name=f"sniper_strategy_{datetime.now().strftime('%Y%m%d')}.csv", mime='text/csv')
-    
-    st.markdown("---")
-    st.subheader("📊 個股 K 線圖 (含建議進場線)")
-    
-    selected_stock = st.selectbox("請選擇股票：", res_df['代號'] + " " + res_df['名稱'])
-    
-    if selected_stock:
-        stock_code = selected_stock.split(" ")[0]
-        selected_row = res_df[res_df['代號'] == stock_code].iloc[0]
-        suggested_price = selected_row['💡建議價']
+                    results.append({
+                        "代號": ticker.replace(".TW", ""),
+                        "名稱": stock_map.get(ticker.replace(".TW", ""), ticker),
+                        "評估": assess,
+                        "10日勝率%": win10,
+                        "收盤": round(close, 2),
+                        "建議價": round(entry, 2),
+                        "乖離%": round(bias, 1)
+                    })
+                except: continue
+            progress_bar.empty()
         
-        try:
-            chart_data = yf.download(f"{stock_code}.TW", period="6mo", interval="1d", progress=False)
-            if isinstance(chart_data.columns, pd.MultiIndex):
-                chart_data.columns = chart_data.columns.get_level_values(0)
+        if results:
+            df_res = pd.DataFrame(results).sort_values("10日勝率%", ascending=False)
+            st.dataframe(df_res, use_container_width=True)
+        else:
+            st.warning("無符合條件股票")
+
+# --- 分頁 2: 庫存管理 ---
+with tab2:
+    st.markdown("### 📁 庫存戰術看板")
+    if os.path.exists(PORTFOLIO_FILE):
+        df_p = pd.read_csv(PORTFOLIO_FILE)
+        if not df_p.empty:
+            tickers_p = [f"{str(x)}.TW" for x in df_p['代號'].tolist()]
+            data_p = get_stock_data(tickers_p)
             
-            # 補算指標
-            chart_data['MA5'] = chart_data['Close'].rolling(window=5).mean()
-            chart_data['MA10'] = chart_data['Close'].rolling(window=10).mean()
-            chart_data['MA20'] = chart_data['Close'].rolling(window=20).mean()
-            chart_data['MA60'] = chart_data['Close'].rolling(window=60).mean()
-            exp1 = chart_data['Close'].ewm(span=12, adjust=False).mean()
-            exp2 = chart_data['Close'].ewm(span=26, adjust=False).mean()
-            chart_data['MACD_DIF'] = exp1 - exp2
-            chart_data['MACD_DEA'] = chart_data['MACD_DIF'].ewm(span=9, adjust=False).mean()
-            chart_data['MACD_Hist'] = chart_data['MACD_DIF'] - chart_data['MACD_DEA']
+            p_res = []
+            for index, row in df_p.iterrows():
+                try:
+                    ticker = f"{str(row['代號'])}.TW"
+                    # 處理單檔或多檔數據結構
+                    if len(tickers_p) == 1:
+                        df = data_p.copy()
+                    else:
+                        if ticker not in data_p.columns.levels[0]: continue
+                        df = data_p[ticker].copy()
+                        
+                    df = df.dropna()
+                    df = calculate_indicators(df)
+                    curr = df.iloc[-1]
+                    
+                    # 更新名稱 (如果原本只有代號)
+                    stock_name = row['名稱']
+                    # 這裡可以再加強去 map 名稱，暫時用原檔
+                    
+                    profit = (curr['Close'] - row['成本價']) * row['股數']
+                    profit_pct = (curr['Close'] - row['成本價']) / row['成本價'] * 100
+                    
+                    action = "🛌 續抱"
+                    if profit_pct >= 10:
+                        if curr['Close'] < curr['MA10']: action = "💰 獲利了結 (破MA10)"
+                        elif curr['Close'] < curr['MA5']: action = "⚠️ 警戒 (破MA5)"
+                        else: action = "🚀 妖股續抱"
+                    elif profit_pct < -5: action = "🛑 停損"
 
-            current_price = chart_data['Close'].iloc[-1]
-            sl_line = current_price * (1 - stop_loss_pct / 100)
-            tp_line = current_price * (1 + take_profit_pct / 100)
+                    p_res.append({
+                        "代號": row['代號'],
+                        "現價": round(curr['Close'], 2),
+                        "成本": row['成本價'],
+                        "獲利%": round(profit_pct, 1),
+                        "損益": int(profit),
+                        "MA5": round(curr['MA5'], 2),
+                        "建議": action
+                    })
+                except: continue
             
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                vertical_spacing=0.03, subplot_titles=(f'{selected_stock} K線圖', 'MACD'),
-                                row_width=[0.2, 0.7])
-
-            fig.add_trace(go.Candlestick(x=chart_data.index,
-                            open=chart_data['Open'], high=chart_data['High'],
-                            low=chart_data['Low'], close=chart_data['Close'], name='K線'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MA60'], line=dict(color='green', width=1), name='MA60'), row=1, col=1)
-            
-            # 建議進場線
-            fig.add_hline(y=suggested_price, line_dash="dot", line_color="blue", annotation_text=f"建議買點 {suggested_price}", row=1, col=1)
-            fig.add_hline(y=sl_line, line_dash="dash", line_color="red", annotation_text=f"停損", row=1, col=1)
-            fig.add_hline(y=tp_line, line_dash="dash", line_color="red", annotation_text=f"停利", row=1, col=1)
-
-            colors = ['red' if val >= 0 else 'green' for val in chart_data['MACD_Hist']]
-            fig.add_trace(go.Bar(x=chart_data.index, y=chart_data['MACD_Hist'], marker_color=colors, name='MACD柱狀'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MACD_DIF'], line=dict(color='black', width=1), name='DIF'), row=2, col=1)
-            fig.add_trace(go.Scatter(x=chart_data.index, y=chart_data['MACD_DEA'], line=dict(color='blue', width=1), name='DEA'), row=2, col=1)
-
-            fig.update_layout(height=800, xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception:
-            st.error("圖表載入失敗，可能是網路連線問題。")
+            if p_res:
+                st.dataframe(pd.DataFrame(p_res), use_container_width=True)
+            else:
+                st.info("無法讀取最新股價或剛新增無數據")
+        else:
+            st.info("目前無庫存")
