@@ -21,10 +21,7 @@ st.set_page_config(page_title="全市場高精準掃描", page_icon="🎯", layo
 
 @st.cache_data(ttl=3600*24)
 def get_all_tw_stocks_map():
-    """
-    自動聯網抓取台股上市普通股代號與「中文名稱」
-    回傳格式: {'2330': '台積電', '2317': '鴻海', ...}
-    """
+    """自動聯網抓取台股上市普通股代號與「中文名稱」"""
     stock_map = {}
     try:
         url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
@@ -36,7 +33,6 @@ def get_all_tw_stocks_map():
         df_twse = df_twse[df_twse['CFICode'] == 'ESVUFR']
         
         for item in df_twse['有價證券代號及名稱']:
-            # item 格式範例: "2330　台積電"
             parts = item.split('\u3000')
             if len(parts) >= 2:
                 code = parts[0].strip()
@@ -53,7 +49,7 @@ def get_all_tw_stocks_map():
         }
     return stock_map
 
-# 建立全域對照表 (稍後主程式會呼叫)
+# 建立全域對照表
 TW_STOCK_MAP = {}
 
 if 'portfolio' not in st.session_state:
@@ -121,7 +117,7 @@ def calculate_sniper_score(data_dict):
     elif rsi_val > 80: score -= 10 
     elif rsi_val < 20: score += 5 
     
-    # 5. 勝率
+    # 5. 勝率 (權重加重)
     win_5d = data_dict['5日勝率%']
     if win_5d > 50: score += 20
     elif win_5d > 30: score += 10
@@ -129,10 +125,7 @@ def calculate_sniper_score(data_dict):
     
     return max(0, min(100, score))
 
-def get_dashboard_data(ticker_code, min_vol, target_rise, ma_filter, forced_name=None):
-    """
-    forced_name: 強制傳入中文名稱 (從 TWSE 列表來的)
-    """
+def get_dashboard_data(ticker_code, min_vol, target_rise, forced_name=None):
     code = str(ticker_code)
     full_ticker = f"{code}.TW" if not code.endswith(('.TW', '.TWO')) else code
     try:
@@ -143,23 +136,24 @@ def get_dashboard_data(ticker_code, min_vol, target_rise, ma_filter, forced_name
         last_vol = df['Volume'].iloc[-1]
         if last_vol < min_vol * 1000: return None
 
-        # --- 名稱處理核心邏輯 ---
-        # 優先使用傳入的中文名，沒有才去問 yfinance
+        # 名稱處理
         if forced_name:
             stock_name = forced_name
         else:
-            stock_name = code # 預設代號
-            # 嘗試找全域表
+            stock_name = code
             if code in TW_STOCK_MAP:
                 stock_name = TW_STOCK_MAP[code]
         
         close = df['Close']
         last_price = close.iloc[-1]
         
+        # 均線計算
         ma20 = close.rolling(20).mean()
         stop_loss_price = ma20.iloc[-1]
         
-        if ma_filter and last_price < stop_loss_price:
+        # --- 鐵血紀律濾網 (強制執行) ---
+        # 只要股價 < 月線 (MA20)，直接淘汰，不回傳任何資料
+        if last_price < stop_loss_price:
             return None
 
         # 乖離率
@@ -260,16 +254,10 @@ def page_dashboard():
 def page_scanner():
     st.header("🎯 全市場自動掃描")
     
-    # 1. 自動獲取清單與名稱 (關鍵修復)
     with st.spinner("📡 正在聯網更新台股清單與中文名稱..."):
-        # 這裡會回傳字典 {'2330': '台積電', ...}
         stock_map = get_all_tw_stocks_map()
-        
-        # 更新全域變數，供其他函數查詢
         global TW_STOCK_MAP
         TW_STOCK_MAP = stock_map
-        
-        # 轉成列表供迴圈使用
         all_codes = list(stock_map.keys())
     
     # --- 左側戰情控制台 (Sidebar) ---
@@ -279,13 +267,16 @@ def page_scanner():
         
         st.divider()
         st.subheader("1. 基礎濾網")
-        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=2000, step=100)
+        # 預設成交量 1000 (平衡流動性與標的數量)
+        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=1000, step=100, help="低於此成交量的股票會直接過濾")
         
         st.subheader("2. 歷史回測設定")
-        target_rise = st.slider("🎯 目標漲幅 (%)", 1, 20, 3, format="%d%%")
+        # 預設勝率門檻 10%
+        target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10, format="%d%%", help="計算勝率用：過去一年持有N天賺超過此%數的機率")
         
         st.subheader("3. 高精準度濾網")
-        ma_filter = st.checkbox("🛡️ 僅顯示多頭排列 (股價 > 月線)", value=False)
+        st.success("✅ 已強制開啟：僅顯示多頭排列 (股價 > 月線)")
+        # 這裡不顯示 Checkbox 了，直接在程式碼中執行邏輯
         
         st.divider()
         st.caption("設定完成後，請按主畫面按鈕開始掃描")
@@ -300,20 +291,18 @@ def page_scanner():
         table_placeholder = st.empty()
         
         for i, c in enumerate(all_codes):
-            # 取得中文名稱
             c_name = stock_map.get(c, c)
-            
             status.text(f"分析中 ({i+1}/{len(all_codes)})：{c} {c_name} ...")
             bar.progress((i+1)/len(all_codes))
             
-            # 傳入中文名稱 forced_name
-            d = get_dashboard_data(c, min_vol, target_rise, ma_filter, forced_name=c_name)
+            # 直接呼叫，不需傳入 ma_filter 參數，因為函式內已經寫死
+            d = get_dashboard_data(c, min_vol, target_rise, forced_name=c_name)
             
             if d:
                 current_res.append(d)
                 temp_df = pd.DataFrame(current_res)
                 st.session_state.scan_results = temp_df
-                # 預覽顯示
+                
                 table_placeholder.dataframe(
                     temp_df[["代號", "名稱", "收盤價", "5日勝率%", "RSI"]].tail(3),
                     hide_index=True
@@ -333,89 +322,4 @@ def page_scanner():
                 "收盤價": st.column_config.NumberColumn(format="$%.2f"),
                 "RSI": st.column_config.NumberColumn("RSI (14)", format="%.1f"),
                 "位階%": st.column_config.ProgressColumn("位階%", format="%.0f%%", min_value=0, max_value=100),
-                "5日勝率%": st.column_config.ProgressColumn(f"5日勝率 (>{target_rise}%)", format="%.1f%%", min_value=0, max_value=100),
-                "10日勝率%": st.column_config.ProgressColumn(f"10日勝率 (>{target_rise}%)", format="%.1f%%", min_value=0, max_value=100),
-                "連結": st.column_config.LinkColumn("情報"),
-                "停損價": None
-            },
-            disabled=["代號", "名稱", "收盤價", "RSI", "乖離", "KD", "MACD", "位階%", "5日勝率%", "10日勝率%"],
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        st.markdown("---")
-        
-        if st.button("🏆 開始評測"):
-            final_df = edited_df[edited_df["選取"] == True].copy()
-            
-            if not final_df.empty:
-                final_df["戰術評分"] = final_df.apply(lambda row: calculate_sniper_score(row), axis=1)
-                final_df = final_df.sort_values(by="戰術評分", ascending=False)
-                
-                st.subheader("🥇 戰術評測前三名")
-                
-                top_3 = final_df.head(3)
-                top_cols = st.columns(3)
-                
-                for i, (index, row) in enumerate(top_3.iterrows()):
-                    with top_cols[i]:
-                        with st.container(border=True):
-                            rank_icon = ["🥇", "🥈", "🥉"][i] if i < 3 else ""
-                            st.markdown(f"### {rank_icon} 第 {i+1} 名")
-                            st.markdown(f"**{row['名稱']} ({row['代號']})**")
-                            st.progress(int(row['戰術評分']), text=f"AI 評分: {int(row['戰術評分'])} 分")
-                            st.divider()
-                            
-                            c1, c2 = st.columns(2)
-                            c1.metric("🎯 建議進場", f"{row['收盤價']:.2f}")
-                            c2.metric("🛡️ 停損 (月線)", f"{row['停損價']:.2f}")
-                            
-                            if row['收盤價'] < row['停損價']:
-                                st.warning("⚠️ 已破月線，觀望")
-                            
-                            st.caption(f"📊 5日勝率: **{row['5日勝率%']:.1f}%** | RSI: **{row['RSI']:.1f}**")
-
-                st.markdown("---")
-                st.subheader("📋 完整評測報告")
-                st.dataframe(
-                    final_df[["名稱", "代號", "收盤價", "戰術評分", "5日勝率%", "RSI", "乖離", "KD", "MACD"]],
-                    column_config={
-                        "戰術評分": st.column_config.ProgressColumn("評分", format="%d 分", min_value=0, max_value=100),
-                        "5日勝率%": st.column_config.NumberColumn(format="%.1f%%"),
-                        "RSI": st.column_config.NumberColumn(format="%.1f"),
-                        "收盤價": st.column_config.NumberColumn(format="$%.2f")
-                    },
-                    hide_index=True,
-                    use_container_width=True
-                )
-            else:
-                st.error("您沒有選取任何股票！")
-
-def page_management():
-    st.header("➕ 庫存管理")
-    with st.form("add"):
-        c1, c2, c3 = st.columns(3)
-        code = c1.text_input("代號")
-        name = c2.text_input("名稱")
-        shares = c3.number_input("股數", value=1000)
-        cost = st.number_input("成本", value=100.0)
-        if st.form_submit_button("新增"):
-            st.session_state.portfolio.append({"code": code, "name": name, "cost": cost, "shares": shares})
-            st.success("已新增")
-            
-    if st.session_state.portfolio:
-        st.dataframe(pd.DataFrame(st.session_state.portfolio))
-        d_idx = st.number_input("刪除索引", min_value=0, max_value=len(st.session_state.portfolio)-1, step=1)
-        if st.button("🗑️ 刪除"):
-            st.session_state.portfolio.pop(d_idx)
-            st.rerun()
-
-def main():
-    st.sidebar.title("🦅 戰情室")
-    page = st.sidebar.radio("導航", ["📡 全市場掃描", "📊 庫存戰術看板", "➕ 庫存管理"])
-    if page == "📊 庫存戰術看板": page_dashboard()
-    elif page == "📡 全市場掃描": page_scanner()
-    elif page == "➕ 庫存管理": page_management()
-
-if __name__ == "__main__":
-    main()
+                "5日勝率%": st.column_config.ProgressColumn(f"5日勝率 (>{target_rise}%)", format="%.1f%%", min_value=0, max
