@@ -4,9 +4,20 @@ import pandas as pd
 import numpy as np
 
 # ==========================================
-# 1. 系統設定
+# 1. 系統設定 & 觀察名單設定
 # ==========================================
 st.set_page_config(page_title="Josh 的股市戰情室", page_icon="🦅", layout="wide")
+
+# 🎯 在這裡設定您的「固定觀察名單」 (不用在畫面上輸入了)
+WATCH_LIST = ["2330", "2317", "2454", "2337", "4916", "8021", "2603", "3231"]
+
+# 常用股票中文名稱對照表
+TW_STOCK_NAMES = {
+    "2330": "台積電", "2317": "鴻海", "2454": "聯發科", 
+    "2337": "旺宏", "4916": "事欣科", "8021": "尖點", 
+    "2603": "長榮", "3231": "緯創", "2609": "陽明", 
+    "2615": "萬海", "3037": "欣興", "3035": "智原"
+}
 
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = [
@@ -17,14 +28,6 @@ if 'portfolio' not in st.session_state:
 
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
-
-# 常用股票中文名稱對照表 (解決 yfinance 顯示英文問題)
-TW_STOCK_NAMES = {
-    "2330": "台積電", "2317": "鴻海", "2454": "聯發科", 
-    "2337": "旺宏", "4916": "事欣科", "8021": "尖點", 
-    "2603": "長榮", "3231": "緯創", "2609": "陽明", 
-    "2615": "萬海", "3037": "欣興", "3035": "智原"
-}
 
 # ==========================================
 # 2. 核心運算引擎
@@ -37,19 +40,15 @@ def generate_strategy_advice(profit_pct):
     else: return "🛑 **停損評估**：虧損擴大，嚴禁凹單！"
 
 def get_stock_name(code, info):
-    # 1. 先查內建字典 (最準)
-    if code in TW_STOCK_NAMES:
-        return TW_STOCK_NAMES[code]
-    # 2. 查無資料則嘗試抓取 yfinance 資訊
+    if code in TW_STOCK_NAMES: return TW_STOCK_NAMES[code]
     try:
         name = info.get('longName') or info.get('shortName')
         if name: return name
-    except:
-        pass
-    return code # 真的都沒有就回傳代號
+    except: pass
+    return code
 
 def calculate_sniper_score(data_dict):
-    """計算戰術評分 (修正了程式碼崩潰的錯誤)"""
+    """計算戰術評分"""
     score = 60 # 基礎分
     
     # 1. 乖離率
@@ -63,7 +62,7 @@ def calculate_sniper_score(data_dict):
     kd_str = data_dict['KD']
     if "🔥 續攻" in kd_str: score += 10
     elif "⚪ 整理" in kd_str: score += 0
-    elif "🧊 超賣" in kd_str: score += 5 # 修正處：這裡原本有語法錯誤
+    elif "🧊 超賣" in kd_str: score += 5 
     elif "⚠️ 過熱" in kd_str: score -= 5
     
     # 3. MACD
@@ -187,11 +186,12 @@ def page_dashboard():
 def page_scanner():
     st.header("🎯 狙擊選股掃描")
     
-    default = "2330, 2317, 2454, 2337, 4916, 8021, 2603, 3231"
-    codes = st.text_area("1. 輸入代號 (逗號分隔)", value=default)
+    # 移除手動輸入框，改為顯示目前名單的提示
+    st.info(f"📋 目前觀察名單：{', '.join(WATCH_LIST)}")
     
     if st.button("🚀 啟動戰情掃描"):
-        s_list = [x.strip() for x in codes.split(",")]
+        # 直接使用程式碼開頭設定的 WATCH_LIST
+        s_list = [x.strip() for x in WATCH_LIST]
         res = []
         bar = st.progress(0)
         
@@ -208,7 +208,7 @@ def page_scanner():
 
     if st.session_state.scan_results is not None:
         st.subheader("2. 戰隊篩選")
-        st.info("💡 提示：在此處取消勾選「暫不考慮」的股票。") # 修正用語
+        st.caption("在此處取消勾選「暫不考慮」的股票。") 
         
         edited_df = st.data_editor(
             st.session_state.scan_results,
@@ -230,7 +230,6 @@ def page_scanner():
             final_df = edited_df[edited_df["選取"] == True].copy()
             
             if not final_df.empty:
-                # 這裡修正了 apply 的錯誤
                 final_df["戰術評分"] = final_df.apply(lambda row: calculate_sniper_score(row), axis=1)
                 final_df = final_df.sort_values(by="戰術評分", ascending=False)
                 
