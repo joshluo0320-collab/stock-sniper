@@ -8,7 +8,6 @@ import pandas as pd
 st.set_page_config(page_title="Josh 的股市戰情室", page_icon="🦅", layout="wide")
 
 # 初始化 session_state 用來存儲「庫存清單」
-# 這樣新增股票後，刷新頁面才不會消失
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = [
         {"code": "2337", "name": "旺宏", "cost": 32.35, "shares": 1000},
@@ -65,8 +64,7 @@ def page_dashboard():
     if st.button("🔄 刷新報價"):
         st.cache_data.clear()
 
-    # 動態產生欄位
-    cols = st.columns(3) # 設定每行顯示 3 個
+    cols = st.columns(3)
     for i, stock in enumerate(st.session_state.portfolio):
         col = cols[i % 3]
         with col:
@@ -93,24 +91,26 @@ def page_dashboard():
 
 def page_scanner():
     st.header("🎯 狙擊選股掃描")
-    st.warning("⚠️ 注意：這裡需要貼回您原本的「選股策略程式碼」。")
     
-    # --- 這裡是用戶原本的選股邏輯區 (範例) ---
-    col1, col2 = st.columns(2)
-    with col1:
-        strategy = st.selectbox("選擇策略", ["多頭排列 (MA5>MA20)", "KD 黃金交叉", "成交量爆發"])
-    with col2:
-        threshold = st.number_input("篩選股價門檻 (>)", value=10, step=1)
+    # --- 這裡是用戶原本的選股邏輯區 ---
+    # 移除了警告文字和選擇策略的下拉選單
+    
+    # 保留一個簡單的參數輸入 (如果您不需要也可以刪除)
+    threshold = st.number_input("篩選股價門檻 (>)", value=10, step=1)
     
     if st.button("🚀 開始掃描"):
-        st.write(f"正在執行策略：**{strategy}** ...")
-        # 這裡模擬掃描結果
-        st.success("掃描完成！發現 1 檔潛力股：")
+        st.write("正在執行掃描邏輯...")
+        
+        # [請在此處貼回您原本的 for 迴圈或篩選程式碼]
+        # 下面是範例顯示，您可以直接把原本的邏輯寫在這裡
+        
+        # 範例結果
+        st.success("掃描完成！(請在此處植入您的篩選邏輯)")
         st.dataframe(pd.DataFrame({
             "代號": ["2330"],
-            "名稱": ["台積電"],
-            "收盤": [1050],
-            "訊號": ["符合"]
+            "名稱": ["範例台積電"],
+            "收盤": [1000],
+            "訊號": ["符合條件"]
         }))
     # ---------------------------------------
 
@@ -128,7 +128,6 @@ def page_management():
         
         if submitted:
             if new_code and new_name:
-                # 新增到 session_state
                 st.session_state.portfolio.append({
                     "code": new_code, 
                     "name": new_name, 
@@ -144,7 +143,6 @@ def page_management():
         df_port = pd.DataFrame(st.session_state.portfolio)
         st.dataframe(df_port)
         
-        # 刪除功能 (簡易版)
         del_idx = st.number_input("輸入要刪除的索引 (Index)", min_value=0, max_value=len(st.session_state.portfolio)-1, step=1)
         if st.button("🗑️ 刪除選定股票"):
             st.session_state.portfolio.pop(del_idx)
@@ -165,7 +163,6 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.info("💡 提示：系統已啟用週一自動回溯機制。")
 
-    # 根據選擇顯示對應頁面
     if page == "📊 庫存戰術看板":
         page_dashboard()
     elif page == "🎯 狙擊選股掃描":
