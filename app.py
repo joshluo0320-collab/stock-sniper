@@ -2,45 +2,46 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 
-# ---------------------------------------------------------
-# 🛠️ 核心函數：智能股價抓取 (解決週一/假日無數據問題)
-# ---------------------------------------------------------
+# ==========================================
+# 1. 核心系統設定 & 狀態初始化
+# ==========================================
+st.set_page_config(page_title="Josh 的股市戰情室", page_icon="🦅", layout="wide")
+
+# 初始化 session_state 用來存儲「庫存清單」
+# 這樣新增股票後，刷新頁面才不會消失
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = [
+        {"code": "2337", "name": "旺宏", "cost": 32.35, "shares": 1000},
+        {"code": "4916", "name": "事欣科", "cost": 64.0, "shares": 2000},
+        {"code": "8021", "name": "尖點", "cost": 239.0, "shares": 200}
+    ]
+
+# ==========================================
+# 2. 核心函數：智能股價抓取 (含週一修復邏輯)
+# ==========================================
 def get_smart_stock_data(ticker_code):
-    """
-    抓取最新股價，邏輯：
-    1. 不抓 '1d' (今天)，改抓 '5d' (過去5天)。
-    2. 自動取 'iloc[-1]' (最後一筆)，無論是週五還是今天，保證有數據。
-    3. 計算漲跌幅 (與前一日收盤比較)。
-    """
-    # 1. 自動補上台股代號後綴 (預設為上市 .TW)
-    # 如果您有上櫃股票(如部分生技股)，可能需要改為 .TWO，這裡先統一用 .TW
     if not str(ticker_code).endswith('.TW') and not str(ticker_code).endswith('.TWO'):
         full_ticker = f"{ticker_code}.TW"
     else:
         full_ticker = ticker_code
 
     try:
-        # 2. 抓取過去 5 天的歷史資料 (關鍵修正！)
+        # 關鍵修復：抓取 5 天資料，確保假日也能顯示上週五收盤價
         stock = yf.Ticker(full_ticker)
         df = stock.history(period="5d")
         
-        # 如果抓不到資料 (例如代號錯誤)
-        if df.empty:
-            return None
+        if df.empty: return None
 
-        # 3. 鎖定「最後一筆」有效數據 (Latest Close)
         last_row = df.iloc[-1]
         latest_price = last_row['Close']
-        latest_date = df.index[-1].strftime('%Y-%m-%d') # 格式化日期
+        latest_date = df.index[-1].strftime('%Y-%m-%d')
         
-        # 4. 計算漲跌 (用最後一筆 vs 倒數第二筆)
         if len(df) >= 2:
             prev_close = df.iloc[-2]['Close']
             change = latest_price - prev_close
             pct_change = (change / prev_close) * 100
         else:
-            change = 0.0
-            pct_change = 0.0
+            change, pct_change = 0.0, 0.0
 
         return {
             "code": ticker_code,
@@ -50,65 +51,127 @@ def get_smart_stock_data(ticker_code):
             "date": latest_date,
             "valid": True
         }
-
-    except Exception as e:
+    except:
         return None
 
-# ---------------------------------------------------------
-# 📱 前端介面：庫存戰術看板 (Streamlit UI)
-# ---------------------------------------------------------
+# ==========================================
+# 3. 介面功能模組
+# ==========================================
 
-st.title("🦅 Josh 的股市狙擊手戰情室")
-st.subheader("🛡️ 庫存戰術看板 (24H 顯示版)")
+def page_dashboard():
+    st.header("📊 庫存戰術看板")
+    st.info(f"目前監控庫存數：{len(st.session_state.portfolio)} 檔")
+    
+    if st.button("🔄 刷新報價"):
+        st.cache_data.clear()
 
-# 模擬您的庫存清單 (您可以連接到您的資料庫或 Excel)
-my_portfolio = [
-    {"code": "2337", "name": "旺宏", "cost": 32.35, "shares": 1000},
-    {"code": "4916", "name": "事欣科", "cost": 64.0, "shares": 2000},
-    {"code": "8021", "name": "尖點", "cost": 239.0, "shares": 200}
-]
-
-# 重新整理按鈕 (清除快取用)
-if st.button("🔄 強制刷新報價"):
-    st.cache_data.clear()
-
-# 建立欄位佈局
-cols = st.columns(len(my_portfolio))
-
-for idx, stock in enumerate(my_portfolio):
-    with cols[idx]:
-        # 呼叫上面的智能函數
-        data = get_smart_stock_data(stock["code"])
-        
-        if data and data["valid"]:
-            # 計算未實現損益 (估算)
-            market_value = data["price"] * stock["shares"]
-            cost_value = stock["cost"] * stock["shares"]
-            profit_loss = market_value - cost_value
-            profit_pct = (profit_loss / cost_value) * 100
-            
-            # 決定顏色 (台股：紅漲綠跌)
-            color_str = "normal"
-            if data["change"] > 0: color_str = "off" # Streamlit metric 自動紅綠邏輯
-            
-            # 顯示數據卡片
-            st.metric(
-                label=f"{stock['name']} ({stock['code']})",
-                value=f"{data['price']:.2f}",
-                delta=f"{data['change']:.2f} ({data['pct_change']:.2f}%)"
-            )
-            
-            # 顯示損益與資料日期 (關鍵：讓您知道這是哪一天的價錢)
-            st.caption(f"資料日期: {data['date']}")
-            
-            # 損益顯示
-            if profit_loss > 0:
-                st.markdown(f":red[獲利: +{int(profit_loss):,} (+{profit_pct:.1f}%)]")
-            else:
-                st.markdown(f":green[虧損: {int(profit_loss):,} ({profit_pct:.1f}%)]")
+    # 動態產生欄位
+    cols = st.columns(3) # 設定每行顯示 3 個
+    for i, stock in enumerate(st.session_state.portfolio):
+        col = cols[i % 3]
+        with col:
+            data = get_smart_stock_data(stock["code"])
+            if data:
+                market_val = data["price"] * stock["shares"]
+                cost_val = stock["cost"] * stock["shares"]
+                profit = market_val - cost_val
+                profit_pct = (profit / cost_val) * 100 if cost_val != 0 else 0
                 
-        else:
-            st.error(f"{stock['name']} 讀取失敗")
+                st.metric(
+                    label=f"{stock['name']} ({stock['code']})",
+                    value=f"{data['price']:.2f}",
+                    delta=f"{data['change']:.2f} ({data['pct_change']:.2f}%)"
+                )
+                if profit > 0:
+                    st.markdown(f"💰 :red[+{int(profit):,} (+{profit_pct:.1f}%)]")
+                else:
+                    st.markdown(f"💸 :green[{int(profit):,} ({profit_pct:.1f}%)]")
+                st.caption(f"資料日期: {data['date']}")
+                st.markdown("---")
+            else:
+                st.error(f"{stock['name']} 讀取失敗")
 
-st.markdown("---")
-st.info("💡 提示：此系統已啟用「智能回溯」機制。即使在週一凌晨或假日，也能顯示最後一筆有效收盤價，不會再顯示空白。")
+def page_scanner():
+    st.header("🎯 狙擊選股掃描")
+    st.warning("⚠️ 注意：這裡需要貼回您原本的「選股策略程式碼」。")
+    
+    # --- 這裡是用戶原本的選股邏輯區 (範例) ---
+    col1, col2 = st.columns(2)
+    with col1:
+        strategy = st.selectbox("選擇策略", ["多頭排列 (MA5>MA20)", "KD 黃金交叉", "成交量爆發"])
+    with col2:
+        threshold = st.number_input("篩選股價門檻 (>)", value=10, step=1)
+    
+    if st.button("🚀 開始掃描"):
+        st.write(f"正在執行策略：**{strategy}** ...")
+        # 這裡模擬掃描結果
+        st.success("掃描完成！發現 1 檔潛力股：")
+        st.dataframe(pd.DataFrame({
+            "代號": ["2330"],
+            "名稱": ["台積電"],
+            "收盤": [1050],
+            "訊號": ["符合"]
+        }))
+    # ---------------------------------------
+
+def page_management():
+    st.header("➕ 庫存管理")
+    
+    with st.form("add_stock_form"):
+        c1, c2, c3 = st.columns(3)
+        new_code = c1.text_input("股票代號 (如 2330)")
+        new_name = c2.text_input("股票名稱 (如 台積電)")
+        new_shares = c3.number_input("持有股數", min_value=1, value=1000)
+        new_cost = st.number_input("平均成本", min_value=0.0, value=100.0)
+        
+        submitted = st.form_submit_button("新增至庫存")
+        
+        if submitted:
+            if new_code and new_name:
+                # 新增到 session_state
+                st.session_state.portfolio.append({
+                    "code": new_code, 
+                    "name": new_name, 
+                    "cost": new_cost, 
+                    "shares": new_shares
+                })
+                st.success(f"✅ 已新增 {new_name} ({new_code})")
+            else:
+                st.error("請輸入完整的代號與名稱")
+
+    st.subheader("📋 目前監控清單")
+    if len(st.session_state.portfolio) > 0:
+        df_port = pd.DataFrame(st.session_state.portfolio)
+        st.dataframe(df_port)
+        
+        # 刪除功能 (簡易版)
+        del_idx = st.number_input("輸入要刪除的索引 (Index)", min_value=0, max_value=len(st.session_state.portfolio)-1, step=1)
+        if st.button("🗑️ 刪除選定股票"):
+            st.session_state.portfolio.pop(del_idx)
+            st.experimental_rerun()
+
+# ==========================================
+# 4. 主程式入口 (側邊選單導航)
+# ==========================================
+def main():
+    st.sidebar.title("🦅 戰情室導航")
+    
+    # 側邊選單選項
+    page = st.sidebar.radio(
+        "前往功能：",
+        ["📊 庫存戰術看板", "🎯 狙擊選股掃描", "➕ 庫存管理"]
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info("💡 提示：系統已啟用週一自動回溯機制。")
+
+    # 根據選擇顯示對應頁面
+    if page == "📊 庫存戰術看板":
+        page_dashboard()
+    elif page == "🎯 狙擊選股掃描":
+        page_scanner()
+    elif page == "➕ 庫存管理":
+        page_management()
+
+if __name__ == "__main__":
+    main()
