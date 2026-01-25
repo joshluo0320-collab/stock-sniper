@@ -8,7 +8,7 @@ import numpy as np
 # ==========================================
 st.set_page_config(page_title="Josh 的股市戰情室", page_icon="🦅", layout="wide")
 
-# 🎯 您的「固定班底」觀察名單 (會自動掃描這些)
+# 🎯 您的「固定班底」觀察名單
 BASE_WATCH_LIST = ["2330", "2317", "2454", "2337", "4916", "8021", "2603", "3231"]
 
 # 常用股票中文名稱對照表
@@ -93,10 +93,11 @@ def get_dashboard_data(ticker_code):
         close = df['Close']
         last_price = close.iloc[-1]
         
-        # 乖離率
+        # 乖離率 & MA20 (停損參考)
         ma20 = close.rolling(20).mean()
         bias = ((close - ma20) / ma20) * 100
         curr_bias = bias.iloc[-1]
+        stop_loss_price = ma20.iloc[-1] # 設定 MA20 為技術停損點
         
         if curr_bias > 10: bias_txt = "🔴 危險"
         elif curr_bias > 5: bias_txt = "🟠 略貴"
@@ -140,6 +141,7 @@ def get_dashboard_data(ticker_code):
             "代號": code,
             "名稱": stock_name,
             "收盤價": last_price,
+            "停損價": stop_loss_price, # 新增欄位
             "乖離": bias_txt,
             "KD": kd_txt,
             "MACD": macd_txt,
@@ -187,19 +189,13 @@ def page_dashboard():
 def page_scanner():
     st.header("🎯 狙擊選股掃描")
     
-    # 1. 手動輸入區 (不會顯示預設名單，只顯示這個輸入框)
     manual_input = st.text_input("➕ 手動加入評測代號 (選填，用逗號分隔，例如: 2303, 2881)")
 
     if st.button("🚀 啟動戰情掃描"):
-        # 合併邏輯：固定名單 + 手動輸入
         target_list = BASE_WATCH_LIST.copy()
-        
         if manual_input:
-            # 處理使用者輸入 (去除空白、分割逗號)
             user_codes = [x.strip() for x in manual_input.split(",") if x.strip()]
             target_list.extend(user_codes)
-            
-        # 去除重複
         target_list = list(set(target_list))
         
         res = []
@@ -216,7 +212,6 @@ def page_scanner():
         else:
             st.warning("無有效資料")
 
-    # 2. 顯示結果與評測
     if st.session_state.scan_results is not None:
         st.subheader("2. 戰隊篩選")
         st.caption("在此處取消勾選「暫不考慮」的股票。") 
@@ -228,7 +223,8 @@ def page_scanner():
                 "收盤價": st.column_config.NumberColumn(format="$%.2f"),
                 "位階%": st.column_config.ProgressColumn("位階%", format="%.0f%%", min_value=0, max_value=100),
                 "連結": st.column_config.LinkColumn("情報"),
-                "raw_ret_5d": None
+                "raw_ret_5d": None,
+                "停損價": None # 篩選階段先隱藏，評測再顯示
             },
             disabled=["代號", "名稱", "收盤價", "乖離", "KD", "MACD", "位階%", "5日漲幅%", "10日漲幅%"],
             hide_index=True,
@@ -241,26 +237,54 @@ def page_scanner():
             final_df = edited_df[edited_df["選取"] == True].copy()
             
             if not final_df.empty:
+                # 計算分數
                 final_df["戰術評分"] = final_df.apply(lambda row: calculate_sniper_score(row), axis=1)
                 final_df = final_df.sort_values(by="戰術評分", ascending=False)
                 
-                st.subheader("🏅 最終勝率評測報告")
+                # --- 新增功能：顯示前三名戰術卡 ---
+                st.subheader("🥇 戰術評測前三名 (進出場建議)")
+                
+                top_3 = final_df.head(3)
+                top_cols = st.columns(3)
+                
+                for i, (index, row) in enumerate(top_3.iterrows()):
+                    with top_cols[i]:
+                        with st.container(border=True):
+                            # 獎盃圖示
+                            rank_icon = ["🥇", "🥈", "🥉"][i] if i < 3 else ""
+                            st.markdown(f"### {rank_icon} 第 {i+1} 名")
+                            st.markdown(f"**{row['名稱']} ({row['代號']})**")
+                            
+                            # 分數條
+                            st.progress(int(row['戰術評分']), text=f"AI 評分: {int(row['戰術評分'])} 分")
+                            
+                            st.divider()
+                            
+                            # 進出場建議
+                            # 建議進場：以現價為主 (狙擊概念)
+                            # 停損價：MA20
+                            c1, c2 = st.columns(2)
+                            c1.metric("🎯 建議進場", f"{row['收盤價']:.2f}")
+                            c2.metric("🛡️ 停損 (月線)", f"{row['停損價']:.2f}")
+                            
+                            # 風險提示
+                            risk_pct = (row['收盤價'] - row['停損價']) / row['收盤價'] * 100
+                            if row['收盤價'] < row['停損價']:
+                                st.warning("⚠️ 股價已破月線，不宜進場")
+                            else:
+                                st.caption(f"潛在風險: -{risk_pct:.1f}%")
+
+                st.markdown("---")
+                st.subheader("📋 完整評測報告")
                 st.dataframe(
                     final_df[["名稱", "代號", "收盤價", "戰術評分", "乖離", "KD", "MACD"]],
                     column_config={
-                        "戰術評分": st.column_config.ProgressColumn(
-                            "AI 綜合評分", 
-                            format="%d 分",
-                            min_value=0, 
-                            max_value=100,
-                        ),
+                        "戰術評分": st.column_config.ProgressColumn("評分", format="%d 分", min_value=0, max_value=100),
                         "收盤價": st.column_config.NumberColumn(format="$%.2f")
                     },
                     hide_index=True,
                     use_container_width=True
                 )
-                top_stock = final_df.iloc[0]
-                st.success(f"🏆 本次評測冠軍：**{top_stock['名稱']} ({top_stock['代號']})**，評分：{top_stock['戰術評分']} 分")
             else:
                 st.error("您沒有選取任何股票！")
 
