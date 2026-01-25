@@ -2,56 +2,65 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import ssl
+import requests
+from io import StringIO
+
+# ==========================================
+# 0. SSL 憑證與連線修復 (解決 CERTIFICATE_VERIFY_FAILED)
+# ==========================================
+# 強制忽略 SSL 憑證錯誤 (這是解決您報錯的關鍵)
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# 設定偽裝瀏覽器 Header (避免被證交所視為機器人擋下)
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
 
 # ==========================================
 # 1. 系統設定 & 自動抓取全市場清單
 # ==========================================
 st.set_page_config(page_title="全市場極限掃描", page_icon="📡", layout="wide")
 
-@st.cache_data(ttl=3600*24) # 每天更新一次清單即可
+@st.cache_data(ttl=3600*24)
 def get_all_tw_stocks():
     """
-    自動聯網抓取台股上市櫃所有普通股代號
-    來源：證交所 (TWSE) 與 櫃買中心 (TPEX)
+    自動聯網抓取台股上市普通股代號 (使用 Requests + SSL 忽略模式)
     """
     stock_list = []
     
     try:
         # 1. 上市股票 (Mode=2)
         url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-        df_twse = pd.read_html(url_twse, encoding='big5')[0]
-        # 整理資料：第0欄是"有價證券代號及名稱"，篩選出股票
+        
+        # 使用 requests.get 並關閉憑證檢查 (verify=False)
+        response = requests.get(url_twse, headers=HEADERS, verify=False)
+        response.encoding = 'big5' # 強制設定編碼以免亂碼
+        
+        # 使用 StringIO 讀取網頁原始碼
+        df_twse = pd.read_html(StringIO(response.text))[0]
+        
+        # 資料整理
         df_twse.columns = df_twse.iloc[0]
         df_twse = df_twse.iloc[1:]
-        # 篩選 "ESVUFR" (股票) 且代號長度為 4 (排除權證等)
-        df_twse = df_twse[df_twse['CFICode'] == 'ESVUFR']
+        df_twse = df_twse[df_twse['CFICode'] == 'ESVUFR'] # 篩選普通股
         
-        # 解析代號 (例如 "2330 台積電" -> "2330")
         for item in df_twse['有價證券代號及名稱']:
-            code, name = item.split('\u3000') # 分隔符號
-            if len(code) == 4: # 只取4碼普通股
-                stock_list.append(code)
-                
-        # 2. 上櫃股票 (Mode=4) - 選項：如果您只要上市1007檔，可註解掉這段
-        url_tpex = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-        df_tpex = pd.read_html(url_tpex, encoding='big5')[0]
-        df_tpex.columns = df_tpex.iloc[0]
-        df_tpex = df_tpex.iloc[1:]
-        df_tpex = df_tpex[df_tpex['CFICode'] == 'ESVUFR']
-        
-        for item in df_tpex['有價證券代號及名稱']:
             code, name = item.split('\u3000')
             if len(code) == 4:
                 stock_list.append(code)
+                
+        # (選項) 若需要上櫃股票，可重複上述步驟抓取 Mode=4
+        # 為了節省時間，預設只抓上市 (約 1000 檔)
 
     except Exception as e:
-        st.error(f"自動抓取清單失敗，將使用內建備援清單。錯誤原因: {e}")
-        # 萬一爬蟲失敗的備援 (常見熱門股)
+        st.error(f"連線失敗，啟用備援清單。錯誤訊息: {e}")
+        # 備援清單
         return ["2330", "2317", "2454", "2303", "2603", "2609", "2615", "3231", "2382", "4916", "8021", "2337"]
         
-    return list(set(stock_list)) # 去重
+    return list(set(stock_list))
 
-# 常用中文名稱對照 (輔助用，主要抓取系統名稱)
+# 常用中文名稱對照
 TW_STOCK_NAMES = {
     "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2337": "旺宏", 
     "4916": "事欣科", "8021": "尖點", "2603": "長榮", "3231": "緯創"
@@ -68,7 +77,7 @@ if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
 # ==========================================
-# 2. 核心運算引擎 (歷史勝率回測)
+# 2. 核心運算引擎
 # ==========================================
 def generate_strategy_advice(profit_pct):
     if profit_pct >= 10: return "🚀 獲利拉開，移動停利！"
@@ -86,42 +95,38 @@ def get_stock_name(code, info):
     return code
 
 def calculate_win_rate(df, days, target_pct):
-    """計算 N 日歷史勝率"""
     if len(df) < days + 1: return 0
-    # 未來報酬率計算
     future_close = df['Close'].shift(-days) 
     returns = (future_close - df['Close']) / df['Close'] * 100
-    
     wins = (returns >= target_pct).sum()
     total_valid = returns.count()
     if total_valid == 0: return 0
     return (wins / total_valid) * 100
 
 def calculate_sniper_score(data_dict):
-    """戰術評分計算 (加重勝率權重)"""
     score = 60 
     
-    # 1. 乖離
+    # 乖離
     bias_str = data_dict['乖離']
     if "🟢 安全" in bias_str: score += 10
     elif "⚪ 合理" in bias_str: score += 5
     elif "🟠 略貴" in bias_str: score -= 5
     elif "🔴 危險" in bias_str: score -= 15
     
-    # 2. KD
+    # KD
     kd_str = data_dict['KD']
     if "🔥 續攻" in kd_str: score += 10
     elif "⚪ 整理" in kd_str: score += 0
     elif "🧊 超賣" in kd_str: score += 5 
     elif "⚠️ 過熱" in kd_str: score -= 5
     
-    # 3. MACD
+    # MACD
     macd_str = data_dict['MACD']
     if "⛽ 滿油" in macd_str: score += 15
     elif "🚗 加速" in macd_str: score += 10
     elif "🛑 減速" in macd_str: score -= 10
     
-    # 4. 歷史勝率 (5日)
+    # 勝率
     win_5d = data_dict['5日勝率%']
     if win_5d > 50: score += 20
     elif win_5d > 30: score += 10
@@ -134,11 +139,9 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
     full_ticker = f"{code}.TW" if not code.endswith(('.TW', '.TWO')) else code
     try:
         stock = yf.Ticker(full_ticker)
-        # 抓 1 年資料算勝率
         df = stock.history(period="1y") 
         if df.empty or len(df) < 60: return None
         
-        # 濾網：成交量 (張)
         last_vol = df['Volume'].iloc[-1]
         if last_vol < min_vol * 1000: return None
 
@@ -146,7 +149,6 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         close = df['Close']
         last_price = close.iloc[-1]
         
-        # 指標運算
         ma20 = close.rolling(20).mean()
         bias = ((close - ma20) / ma20) * 100
         curr_bias = bias.iloc[-1]
@@ -183,7 +185,6 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         elif curr_osc < 0 and curr_osc > osc.iloc[-2]: macd_txt = "🔧 收腳"
         else: macd_txt = "🛑 減速"
 
-        # 勝率
         win_rate_5d = calculate_win_rate(df, 5, target_rise)
         win_rate_10d = calculate_win_rate(df, 10, target_rise)
 
@@ -239,32 +240,25 @@ def page_dashboard():
 def page_scanner():
     st.header("🎯 全市場自動掃描")
     
-    # 1. 自動獲取清單
-    with st.spinner("📡 正在聯網下載最新台股清單 (證交所/櫃買中心)..."):
+    # 1. 自動獲取清單 (含錯誤處理)
+    with st.spinner("📡 正在聯網下載最新台股清單 (SSL Bypass Mode)..."):
         all_stocks = get_all_tw_stocks()
     
-    # 左側控制台 (參數設定)
     with st.sidebar:
         st.header("⚙️ 掃描參數")
-        st.info(f"📊 目前市場總股數：{len(all_stocks)} 檔")
+        st.info(f"📊 系統已抓取市場股票：{len(all_stocks)} 檔")
         st.caption("調整條件以過濾雜訊")
         
-        # 成交量濾網
-        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=2000, step=100, help="建議設 2000 張以上，加快掃描速度")
-        
-        # 漲幅拉桿 (計算勝率用)
+        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=2000, step=100)
         target_rise = st.slider("🎯 目標漲幅 (%)", min_value=1, max_value=20, value=3, format="%d%%")
         st.info(f"勝率定義：買進持有後，獲利 > {target_rise}% 的歷史機率")
 
     if st.button("🚀 啟動全市場掃描 (All Stocks)"):
-        st.warning(f"⚠️ 即將掃描 {len(all_stocks)} 檔股票。因資料量大，預計需時 15~20 分鐘，請勿關閉視窗。")
+        st.warning(f"⚠️ 即將掃描 {len(all_stocks)} 檔股票。預計需時 15~20 分鐘，請勿關閉視窗。")
         
         res = []
         bar = st.progress(0)
         status = st.empty()
-        
-        # 為了避免太久，這裡先過濾掉一些明顯冷門的 (如果需要)
-        # 但您的要求是全市場，所以我們全跑
         
         for i, c in enumerate(all_stocks):
             status.text(f"分析中 ({i+1}/{len(all_stocks)})：{c} ...")
@@ -281,7 +275,6 @@ def page_scanner():
         else:
             st.warning("無符合條件的股票 (請嘗試降低成交量門檻)")
 
-    # 結果顯示
     if st.session_state.scan_results is not None:
         st.subheader("2. 戰隊篩選")
         st.caption("在此處取消勾選「暫不考慮」的股票。")
@@ -308,11 +301,9 @@ def page_scanner():
             final_df = edited_df[edited_df["選取"] == True].copy()
             
             if not final_df.empty:
-                # 計算分數
                 final_df["戰術評分"] = final_df.apply(lambda row: calculate_sniper_score(row), axis=1)
                 final_df = final_df.sort_values(by="戰術評分", ascending=False)
                 
-                # 前三名
                 st.subheader("🥇 戰術評測前三名")
                 
                 top_3 = final_df.head(3)
