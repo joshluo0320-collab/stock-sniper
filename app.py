@@ -125,7 +125,10 @@ def calculate_sniper_score(data_dict):
     
     return max(0, min(100, score))
 
-def get_dashboard_data(ticker_code, min_vol, target_rise, forced_name=None):
+def get_dashboard_data(ticker_code, min_vol, target_rise, min_win_rate_10d, forced_name=None):
+    """
+    新增參數: min_win_rate_10d (最低10日勝率要求)
+    """
     code = str(ticker_code)
     full_ticker = f"{code}.TW" if not code.endswith(('.TW', '.TWO')) else code
     try:
@@ -151,10 +154,18 @@ def get_dashboard_data(ticker_code, min_vol, target_rise, forced_name=None):
         ma20 = close.rolling(20).mean()
         stop_loss_price = ma20.iloc[-1]
         
-        # --- 鐵血紀律濾網 (強制執行) ---
-        # 只要股價 < 月線 (MA20)，直接淘汰，不回傳任何資料
+        # 濾網1: 鐵血紀律 (股價 > MA20)
         if last_price < stop_loss_price:
             return None
+
+        # 勝率計算 (優先計算，不符合直接踢除，節省效能)
+        win_rate_10d = calculate_win_rate(df, 10, target_rise)
+        
+        # 濾網2: 10日勝率 > 40% (User New Condition)
+        if win_rate_10d < min_win_rate_10d:
+            return None
+            
+        win_rate_5d = calculate_win_rate(df, 5, target_rise)
 
         # 乖離率
         bias = ((close - ma20) / ma20) * 100
@@ -197,9 +208,6 @@ def get_dashboard_data(ticker_code, min_vol, target_rise, forced_name=None):
         elif curr_osc > 0: macd_txt = "🚗 加速"
         elif curr_osc < 0 and curr_osc > osc.iloc[-2]: macd_txt = "🔧 收腳"
         else: macd_txt = "🛑 減速"
-
-        win_rate_5d = calculate_win_rate(df, 5, target_rise)
-        win_rate_10d = calculate_win_rate(df, 10, target_rise)
 
         return {
             "選取": True,
@@ -267,16 +275,18 @@ def page_scanner():
         
         st.divider()
         st.subheader("1. 基礎濾網")
-        # 預設成交量 1000 (平衡流動性與標的數量)
-        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=1000, step=100, help="低於此成交量的股票會直接過濾")
+        # 成交量建議預設值 1000
+        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=1000, step=100)
         
         st.subheader("2. 歷史回測設定")
-        # 預設勝率門檻 10%
-        target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10, format="%d%%", help="計算勝率用：過去一年持有N天賺超過此%數的機率")
+        # 勝率預設 10%
+        target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10, format="%d%%")
         
         st.subheader("3. 高精準度濾網")
-        st.success("✅ 已強制開啟：僅顯示多頭排列 (股價 > 月線)")
-        # 這裡不顯示 Checkbox 了，直接在程式碼中執行邏輯
+        st.success("✅ 強制開啟：股價 > 月線 (MA20)")
+        
+        # 新增條件：10日勝率濾網
+        min_win_rate = st.slider("🔥 最低10日勝率 (%)", 0, 100, 40, help="只有過去一年內，持有10天獲利機率超過此數值的股票才會顯示")
         
         st.divider()
         st.caption("設定完成後，請按主畫面按鈕開始掃描")
@@ -295,8 +305,8 @@ def page_scanner():
             status.text(f"分析中 ({i+1}/{len(all_codes)})：{c} {c_name} ...")
             bar.progress((i+1)/len(all_codes))
             
-            # 直接呼叫，不需傳入 ma_filter 參數，因為函式內已經寫死
-            d = get_dashboard_data(c, min_vol, target_rise, forced_name=c_name)
+            # 傳入 min_win_rate 參數
+            d = get_dashboard_data(c, min_vol, target_rise, min_win_rate, forced_name=c_name)
             
             if d:
                 current_res.append(d)
@@ -304,12 +314,12 @@ def page_scanner():
                 st.session_state.scan_results = temp_df
                 
                 table_placeholder.dataframe(
-                    temp_df[["代號", "名稱", "收盤價", "5日勝率%", "RSI"]].tail(3),
+                    temp_df[["代號", "名稱", "收盤價", "10日勝率%", "5日勝率%"]].tail(3),
                     hide_index=True
                 )
 
         bar.empty()
-        status.text(f"掃描完成！共找到 {len(current_res)} 檔。")
+        status.text(f"掃描完成！共找到 {len(current_res)} 檔符合勝率之股票。")
 
     # 結果顯示區
     if st.session_state.scan_results is not None:
@@ -362,14 +372,15 @@ def page_scanner():
                             if row['收盤價'] < row['停損價']:
                                 st.warning("⚠️ 已破月線，觀望")
                             
-                            st.caption(f"📊 5日勝率: **{row['5日勝率%']:.1f}%** | RSI: **{row['RSI']:.1f}**")
+                            st.caption(f"📊 10日勝率: **{row['10日勝率%']:.1f}%** | RSI: **{row['RSI']:.1f}**")
 
                 st.markdown("---")
                 st.subheader("📋 完整評測報告")
                 st.dataframe(
-                    final_df[["名稱", "代號", "收盤價", "戰術評分", "5日勝率%", "RSI", "乖離", "KD", "MACD"]],
+                    final_df[["名稱", "代號", "收盤價", "戰術評分", "10日勝率%", "5日勝率%", "RSI", "乖離", "KD", "MACD"]],
                     column_config={
                         "戰術評分": st.column_config.ProgressColumn("評分", format="%d 分", min_value=0, max_value=100),
+                        "10日勝率%": st.column_config.NumberColumn(format="%.1f%%"),
                         "5日勝率%": st.column_config.NumberColumn(format="%.1f%%"),
                         "RSI": st.column_config.NumberColumn(format="%.1f"),
                         "收盤價": st.column_config.NumberColumn(format="$%.2f")
