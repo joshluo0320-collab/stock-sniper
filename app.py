@@ -7,7 +7,7 @@ import requests
 from io import StringIO
 
 # ==========================================
-# 0. SSL 憑證修復
+# 0. SSL 憑證修復 (必要)
 # ==========================================
 ssl._create_default_https_context = ssl._create_unverified_context
 HEADERS = {
@@ -17,7 +17,7 @@ HEADERS = {
 # ==========================================
 # 1. 系統設定 & 自動抓取全市場清單
 # ==========================================
-st.set_page_config(page_title="全市場掃描", page_icon="📡", layout="wide")
+st.set_page_config(page_title="全市場高精準掃描", page_icon="🎯", layout="wide")
 
 @st.cache_data(ttl=3600*24)
 def get_all_tw_stocks():
@@ -57,7 +57,7 @@ if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
 # ==========================================
-# 2. 核心運算引擎
+# 2. 核心運算引擎 (新增 RSI 與 趨勢判斷)
 # ==========================================
 def generate_strategy_advice(profit_pct):
     if profit_pct >= 10: return "🚀 獲利拉開，移動停利！"
@@ -83,26 +83,44 @@ def calculate_win_rate(df, days, target_pct):
     if total_valid == 0: return 0
     return (wins / total_valid) * 100
 
+def calculate_rsi(series, period=14):
+    """計算 RSI 指標"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 def calculate_sniper_score(data_dict):
     score = 60 
     
+    # 1. 乖離率
     bias_str = data_dict['乖離']
     if "🟢 安全" in bias_str: score += 10
     elif "⚪ 合理" in bias_str: score += 5
     elif "🟠 略貴" in bias_str: score -= 5
     elif "🔴 危險" in bias_str: score -= 15
     
+    # 2. KD
     kd_str = data_dict['KD']
     if "🔥 續攻" in kd_str: score += 10
     elif "⚪ 整理" in kd_str: score += 0
     elif "🧊 超賣" in kd_str: score += 5 
     elif "⚠️ 過熱" in kd_str: score -= 5
     
+    # 3. MACD
     macd_str = data_dict['MACD']
     if "⛽ 滿油" in macd_str: score += 15
     elif "🚗 加速" in macd_str: score += 10
     elif "🛑 減速" in macd_str: score -= 10
     
+    # 4. RSI (新增精準度變項)
+    rsi_val = data_dict['RSI']
+    if 40 <= rsi_val <= 70: score += 10 # 健康區間
+    elif rsi_val > 80: score -= 10 # 過熱風險
+    elif rsi_val < 20: score += 5 # 反彈機會
+    
+    # 5. 歷史勝率
     win_5d = data_dict['5日勝率%']
     if win_5d > 50: score += 20
     elif win_5d > 30: score += 10
@@ -110,7 +128,7 @@ def calculate_sniper_score(data_dict):
     
     return max(0, min(100, score))
 
-def get_dashboard_data(ticker_code, min_vol, target_rise):
+def get_dashboard_data(ticker_code, min_vol, target_rise, ma_filter):
     code = str(ticker_code)
     full_ticker = f"{code}.TW" if not code.endswith(('.TW', '.TWO')) else code
     try:
@@ -118,6 +136,7 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         df = stock.history(period="1y") 
         if df.empty or len(df) < 60: return None
         
+        # 成交量濾網
         last_vol = df['Volume'].iloc[-1]
         if last_vol < min_vol * 1000: return None
 
@@ -125,20 +144,34 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         close = df['Close']
         last_price = close.iloc[-1]
         
+        # 均線計算
         ma20 = close.rolling(20).mean()
+        stop_loss_price = ma20.iloc[-1]
+        
+        # --- 新增：趨勢濾網 (Trend Filter) ---
+        # 如果開啟濾網，且股價 < 月線，直接淘汰
+        if ma_filter and last_price < stop_loss_price:
+            return None
+
+        # 乖離率
         bias = ((close - ma20) / ma20) * 100
         curr_bias = bias.iloc[-1]
-        stop_loss_price = ma20.iloc[-1]
         
         if curr_bias > 10: bias_txt = "🔴 危險"
         elif curr_bias > 5: bias_txt = "🟠 略貴"
         elif curr_bias < -5: bias_txt = "🟢 安全"
         else: bias_txt = "⚪ 合理"
         
+        # RSI 計算 (新增)
+        rsi_series = calculate_rsi(close)
+        curr_rsi = rsi_series.iloc[-1]
+        
+        # 位階
         high60 = df['High'].rolling(60).max()
         low60 = df['Low'].rolling(60).min()
         pos = ((close - low60) / (high60 - low60)) * 100
         
+        # KD
         rsv = (close - df['Low'].rolling(9).min()) / (df['High'].rolling(9).max() - df['Low'].rolling(9).min()) * 100
         k = rsv.ewm(com=2).mean()
         d = k.ewm(com=2).mean()
@@ -149,6 +182,7 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         elif curr_k < 20: kd_txt = "🧊 超賣"
         else: kd_txt = "⚪ 整理"
         
+        # MACD
         ema12 = close.ewm(span=12).mean()
         ema26 = close.ewm(span=26).mean()
         dif = ema12 - ema26
@@ -161,6 +195,7 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
         elif curr_osc < 0 and curr_osc > osc.iloc[-2]: macd_txt = "🔧 收腳"
         else: macd_txt = "🛑 減速"
 
+        # 勝率
         win_rate_5d = calculate_win_rate(df, 5, target_rise)
         win_rate_10d = calculate_win_rate(df, 10, target_rise)
 
@@ -170,6 +205,7 @@ def get_dashboard_data(ticker_code, min_vol, target_rise):
             "名稱": stock_name,
             "收盤價": last_price,
             "停損價": stop_loss_price,
+            "RSI": curr_rsi, # 新增數據
             "乖離": bias_txt,
             "KD": kd_txt,
             "MACD": macd_txt,
@@ -216,22 +252,34 @@ def page_dashboard():
 def page_scanner():
     st.header("🎯 全市場自動掃描")
     
-    with st.spinner("📡 正在聯網下載台股清單..."):
+    # 自動獲取清單
+    with st.spinner("📡 正在聯網更新台股清單..."):
         all_stocks = get_all_tw_stocks()
     
-    # 參數設定區 (置頂)
-    with st.container():
-        c1, c2, c3 = st.columns(3)
-        min_vol = c1.number_input("🌊 最低成交量 (張)", min_value=0, value=2000, step=100)
-        target_rise = c2.slider("🎯 目標漲幅 (算勝率用)", 1, 20, 3, format="%d%%")
-        # 說明
-        c3.info(f"掃描範圍：{len(all_stocks)} 檔股票")
-    
-    st.divider()
+    # --- 左側戰情控制台 (Sidebar) ---
+    with st.sidebar:
+        st.header("⚙️ 戰術控制台")
+        st.info(f"📊 市場總股數：{len(all_stocks)} 檔")
+        
+        st.divider()
+        st.subheader("1. 基礎濾網")
+        # 成交量
+        min_vol = st.number_input("🌊 最低成交量 (張)", min_value=0, value=2000, step=100)
+        
+        st.subheader("2. 歷史回測設定")
+        # 漲幅拉桿
+        target_rise = st.slider("🎯 目標漲幅 (%)", 1, 20, 3, format="%d%%", help="計算勝率用：過去一年持有N天賺超過此%數的機率")
+        
+        st.subheader("3. 高精準度濾網 (新增)")
+        # 趨勢濾網開關
+        ma_filter = st.checkbox("🛡️ 僅顯示多頭排列 (股價 > 月線)", value=False, help="勾選後，將自動過濾掉股價跌破月線的弱勢股，提高勝率。")
+        
+        st.divider()
+        st.caption("設定完成後，請按主畫面按鈕開始掃描")
 
-    # 開始按鈕
+    # 主畫面掃描區
     if st.button("🚀 啟動全市場掃描", type="primary"):
-        st.warning("🛑 掃描進行中... 若需停止，請直接按瀏覽器右上角的 'Stop' 或 'X' 按鈕。")
+        st.warning("🛑 掃描進行中... 如需停止，請按瀏覽器右上角的 'Stop' 或 'X'。")
         
         current_res = []
         bar = st.progress(0)
@@ -242,13 +290,15 @@ def page_scanner():
             status.text(f"分析中 ({i+1}/{len(all_stocks)})：{c} ...")
             bar.progress((i+1)/len(all_stocks))
             
-            d = get_dashboard_data(c, min_vol, target_rise)
+            # 傳入 ma_filter 參數
+            d = get_dashboard_data(c, min_vol, target_rise, ma_filter)
             
             if d:
                 current_res.append(d)
-                # 即時更新顯示 (每抓到一檔就更新，讓您隨時想停都可以)
+                # 即時更新顯示
                 temp_df = pd.DataFrame(current_res)
                 st.session_state.scan_results = temp_df
+                # 簡易預覽
                 table_placeholder.dataframe(
                     temp_df[["代號", "名稱", "收盤價", "5日勝率%", "乖離"]].tail(3),
                     hide_index=True
@@ -257,7 +307,7 @@ def page_scanner():
         bar.empty()
         status.text(f"掃描完成！共找到 {len(current_res)} 檔。")
 
-    # 顯示結果
+    # 結果顯示區
     if st.session_state.scan_results is not None:
         st.subheader("2. 戰隊篩選")
         
@@ -266,13 +316,14 @@ def page_scanner():
             column_config={
                 "選取": st.column_config.CheckboxColumn("加入戰隊?", default=True),
                 "收盤價": st.column_config.NumberColumn(format="$%.2f"),
+                "RSI": st.column_config.NumberColumn("RSI (14)", format="%.1f"), # 新增 RSI 顯示
                 "位階%": st.column_config.ProgressColumn("位階%", format="%.0f%%", min_value=0, max_value=100),
                 "5日勝率%": st.column_config.ProgressColumn(f"5日勝率 (>{target_rise}%)", format="%.1f%%", min_value=0, max_value=100),
                 "10日勝率%": st.column_config.ProgressColumn(f"10日勝率 (>{target_rise}%)", format="%.1f%%", min_value=0, max_value=100),
                 "連結": st.column_config.LinkColumn("情報"),
                 "停損價": None
             },
-            disabled=["代號", "名稱", "收盤價", "乖離", "KD", "MACD", "位階%", "5日勝率%", "10日勝率%"],
+            disabled=["代號", "名稱", "收盤價", "RSI", "乖離", "KD", "MACD", "位階%", "5日勝率%", "10日勝率%"],
             hide_index=True,
             use_container_width=True
         )
@@ -307,15 +358,16 @@ def page_scanner():
                             if row['收盤價'] < row['停損價']:
                                 st.warning("⚠️ 已破月線，觀望")
                             
-                            st.caption(f"📊 5日勝率: **{row['5日勝率%']:.1f}%**")
+                            st.caption(f"📊 5日勝率: **{row['5日勝率%']:.1f}%** | RSI: **{row['RSI']:.1f}**")
 
                 st.markdown("---")
                 st.subheader("📋 完整評測報告")
                 st.dataframe(
-                    final_df[["名稱", "代號", "收盤價", "戰術評分", "5日勝率%", "乖離", "KD", "MACD"]],
+                    final_df[["名稱", "代號", "收盤價", "戰術評分", "5日勝率%", "RSI", "乖離", "KD", "MACD"]],
                     column_config={
                         "戰術評分": st.column_config.ProgressColumn("評分", format="%d 分", min_value=0, max_value=100),
                         "5日勝率%": st.column_config.NumberColumn(format="%.1f%%"),
+                        "RSI": st.column_config.NumberColumn(format="%.1f"),
                         "收盤價": st.column_config.NumberColumn(format="$%.2f")
                     },
                     hide_index=True,
