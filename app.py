@@ -286,3 +286,73 @@ def page_scanner():
             
             if not final_df.empty:
                 # 計算分數
+                final_df["戰術評分"] = final_df.apply(lambda row: calculate_sniper_score(row), axis=1)
+                final_df = final_df.sort_values(by="戰術評分", ascending=False)
+                
+                # 前三名
+                st.subheader("🥇 戰術評測前三名")
+                
+                top_3 = final_df.head(3)
+                top_cols = st.columns(3)
+                
+                for i, (index, row) in enumerate(top_3.iterrows()):
+                    with top_cols[i]:
+                        with st.container(border=True):
+                            rank_icon = ["🥇", "🥈", "🥉"][i] if i < 3 else ""
+                            st.markdown(f"### {rank_icon} 第 {i+1} 名")
+                            st.markdown(f"**{row['名稱']} ({row['代號']})**")
+                            st.progress(int(row['戰術評分']), text=f"AI 評分: {int(row['戰術評分'])} 分")
+                            st.divider()
+                            
+                            c1, c2 = st.columns(2)
+                            c1.metric("🎯 建議進場", f"{row['收盤價']:.2f}")
+                            c2.metric("🛡️ 停損 (月線)", f"{row['停損價']:.2f}")
+                            
+                            if row['收盤價'] < row['停損價']:
+                                st.warning("⚠️ 已破月線，觀望")
+                            
+                            st.caption(f"📊 5日勝率: **{row['5日勝率%']:.1f}%**")
+
+                st.markdown("---")
+                st.subheader("📋 完整評測報告")
+                st.dataframe(
+                    final_df[["名稱", "代號", "收盤價", "戰術評分", "5日勝率%", "乖離", "KD", "MACD"]],
+                    column_config={
+                        "戰術評分": st.column_config.ProgressColumn("評分", format="%d 分", min_value=0, max_value=100),
+                        "5日勝率%": st.column_config.NumberColumn(format="%.1f%%"),
+                        "收盤價": st.column_config.NumberColumn(format="$%.2f")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+            else:
+                st.error("您沒有選取任何股票！")
+
+def page_management():
+    st.header("➕ 庫存管理")
+    with st.form("add"):
+        c1, c2, c3 = st.columns(3)
+        code = c1.text_input("代號")
+        name = c2.text_input("名稱")
+        shares = c3.number_input("股數", value=1000)
+        cost = st.number_input("成本", value=100.0)
+        if st.form_submit_button("新增"):
+            st.session_state.portfolio.append({"code": code, "name": name, "cost": cost, "shares": shares})
+            st.success("已新增")
+            
+    if st.session_state.portfolio:
+        st.dataframe(pd.DataFrame(st.session_state.portfolio))
+        d_idx = st.number_input("刪除索引", min_value=0, max_value=len(st.session_state.portfolio)-1, step=1)
+        if st.button("🗑️ 刪除"):
+            st.session_state.portfolio.pop(d_idx)
+            st.rerun()
+
+def main():
+    st.sidebar.title("🦅 戰情室")
+    page = st.sidebar.radio("導航", ["📡 全自動掃描", "📊 庫存戰術看板", "➕ 庫存管理"])
+    if page == "📊 庫存戰術看板": page_dashboard()
+    elif page == "📡 全自動掃描": page_scanner()
+    elif page == "➕ 庫存管理": page_management()
+
+if __name__ == "__main__":
+    main()
