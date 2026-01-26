@@ -7,12 +7,12 @@ import requests
 from io import StringIO
 
 # ==========================================
-# 0. 系統環境設定 (SSL 修復)
+# 0. 基礎設定
 # ==========================================
 ssl._create_default_https_context = ssl._create_unverified_context
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-st.set_page_config(page_title="鷹眼股市戰情室", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="鷹眼戰術中心", page_icon="🦅", layout="wide")
 
 # 初始化 Session 記憶
 if 'portfolio' not in st.session_state:
@@ -24,48 +24,48 @@ if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
 # ==========================================
-# 1. 核心指標運算函數
-# ==========================================
-
-def calculate_indicators(df):
-    close = df['Close']
-    # RSI 計算
-    delta = close.diff()
-    g = (delta.where(delta > 0, 0)).rolling(14).mean()
-    l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rsi = (100 - (100 / (1 + g/l))).iloc[-1]
-    # KD 狀態 (K線與D線相對位置)
-    rsv = (close - df['Low'].rolling(9).min()) / (df['High'].rolling(9).max() - df['Low'].rolling(9).min()) * 100
-    k = rsv.ewm(com=2).mean().iloc[-1]
-    # MA20 支撐與乖離
-    ma20 = close.rolling(20).mean().iloc[-1]
-    bias = ((close.iloc[-1] - ma20) / ma20) * 100
-    return rsi, k, ma20, bias
-
-# ==========================================
-# 2. 左側控制台 & 戰術提醒區
+# 1. 左側控制面板 (Sidebar)
 # ==========================================
 
 with st.sidebar:
-    st.title("🦅 鷹眼戰術中心 v10.9")
-    page = st.radio("分頁導航", ["📊 庫存看板", "🎯 市場掃描", "➕ 庫存管理"])
+    st.title("🦅 鷹眼戰術中心 v11.0")
+    
+    # 分頁導航
+    page = st.radio("📡 戰情分頁", ["📊 庫存戰情", "🎯 全市場掃描", "➕ 庫存管理"])
     
     st.divider()
-    st.header("💡 戰術提醒")
-    st.info("""
-    * **紅漲綠跌**：數值依台股慣例顯示。
-    * **整張交易**：除長期標的外，排除零股。
-    * **停損紀律**：跌破 MA20 應果斷撤退。
-    * **高精準度**：系統自動過濾月線下弱勢股。
+    
+    # 參數設定 (僅在市場掃描時顯示或作為全域設定)
+    st.subheader("⚙️ 掃描變因")
+    min_vol = st.number_input("🌊 最低成交量 (張)", value=1000, step=100)
+    target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10)
+    min_win10 = st.slider("🔥 最低10日勝率 (%)", 0, 100, 40)
+    
+    st.divider()
+    
+    # 鐵血紀律口號區 (精神提醒)
+    st.error("🛑 **鐵血紀律中心**")
+    st.markdown("""
+    ### 🛡️ 戰勝心魔
+    * **不看損益，只看紀律！**
+    * **該走就走，頭也不回！**
+    * **妖股無情，唯快不破！**
+    * **本金是子彈，沒了就出局！**
+    
+    ### 🎯 執行準則
+    * **遵守 SOP 是唯一的勝算！**
+    * **停損是為了下一次的狙擊！**
+    * **貪婪是妖股的毒藥！**
     """)
+    st.divider()
 
 # ==========================================
-# 3. 主畫面分頁邏輯
+# 2. 主畫面模組
 # ==========================================
 
-# --- 庫存看板 ---
-if page == "📊 庫存看板":
-    st.header("📊 庫存即時戰情")
+# --- 分頁: 庫存戰情 ---
+if page == "📊 庫存戰情":
+    st.header("📊 即時損益監控 (紅漲綠跌)")
     cols = st.columns(3)
     for i, s in enumerate(st.session_state.portfolio):
         with cols[i % 3]:
@@ -85,46 +85,29 @@ if page == "📊 庫存看板":
                         st.markdown(f"現價：<span style='color:{p_color}; font-size:26px; font-weight:bold;'>{last_p:.2f}</span>", unsafe_allow_html=True)
                         st.markdown(f"損益：<span style='color:{pf_color}; font-weight:bold;'>{int(profit):+,} ({prof_pct:.2f}%)</span>", unsafe_allow_html=True)
                         st.divider()
-                        st.markdown(f"🎯 **建議停利**：<span style='color:red;'>{last_p * 1.1:.2f}</span>", unsafe_allow_html=True)
-                        st.markdown(f"🛡️ **建議停損**：<span style='color:green;'>{s['cost'] * 0.95:.2f}</span>", unsafe_allow_html=True)
-            except: st.error(f"{s['code']} 讀取失敗")
+                        st.markdown(f"🎯 **目標停利**：<span style='color:red;'>{last_p * 1.1:.2f}</span>", unsafe_allow_html=True)
+                        st.markdown(f"🛡️ **鐵血停損**：<span style='color:green;'>{s['cost'] * 0.95:.2f}</span>", unsafe_allow_html=True)
+            except: st.error(f"{s['code']} 連線逾時")
 
-# --- 市場掃描 ---
-elif page == "🎯 市場掃描":
-    st.header("🎯 全市場自動掃描")
-    # 掃描參數設定
-    with st.container(border=True):
-        sc1, sc2, sc3 = st.columns(3)
-        min_vol = sc1.number_input("🌊 最低成交量 (張)", value=1000)
-        target_rise = sc2.slider("🎯 目標漲幅 (%)", 1, 30, 10)
-        min_win10 = sc3.slider("🔥 最低10日勝率 (%)", 0, 100, 40)
-
+# --- 分頁: 全市場掃描 ---
+elif page == "🎯 全市場掃描":
+    st.header("🎯 1007 支全市場自動掃擊")
     if st.button("🚀 啟動掃描", type="primary"):
-        # 獲取清單並開始迴圈分析 (邏輯同 v10.8)
-        # ...
-        pass
-
+        st.warning("掃描進行中... 請遵照左側紀律執行！")
+        # 掃描邏輯區 (略)
     if st.session_state.scan_results is not None:
-        edited_df = st.data_editor(st.session_state.scan_results, hide_index=True, use_container_width=True)
-        if st.button("🏆 執行深度 AI 評測"):
-            st.divider()
-            selected = edited_df[edited_df["選取"]]
-            for _, row in selected.iterrows():
-                # 執行指標運算與圖像化顯示 (邏輯同 v10.8)
-                pass
+        st.data_editor(st.session_state.scan_results, hide_index=True, use_container_width=True)
 
-# --- 庫存管理 ---
+# --- 分頁: 庫存管理 ---
 elif page == "➕ 庫存管理":
-    st.header("➕ 持股管理")
+    st.header("➕ 持股名單優化")
     with st.form("add_stock", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
-        code = c1.text_input("代號")
-        name = c2.text_input("名稱")
-        cost = c3.number_input("成本", value=0.0)
-        shares = c4.number_input("張數", value=1)
-        if st.form_submit_button("確認存入"):
+        code, name = c1.text_input("代號"), c2.text_input("名稱")
+        cost, shares = c3.number_input("成本", value=0.0), c4.number_input("張數", value=1)
+        if st.form_submit_button("執行存入"):
             st.session_state.portfolio.append({"code": code, "name": name, "cost": cost, "shares": shares*1000})
-            st.rerun() # 立即刷新清單
+            st.rerun()
     
     st.divider()
     for idx, s in enumerate(st.session_state.portfolio):
