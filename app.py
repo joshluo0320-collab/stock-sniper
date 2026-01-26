@@ -19,38 +19,36 @@ if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
 # ==========================================
-# 1. 指標白話文 (右側交易視角)
+# 1. 核心工具函數
 # ==========================================
 def get_rank_info(val):
-    if val < 40: return f"{val:.2f}% (📈 穩健：趨勢剛起步，右側進場點)"
-    if val < 80: return f"{val:.2f}% (🚀 衝刺：動能極強，順勢狙擊)"
-    return f"{val:.2f}% (💀 超標：過度噴發，嚴守鐵血停損)"
+    if val < 40: return f"{val:.2f}% (📈 穩健：趨勢起步)"
+    if val < 80: return f"{val:.2f}% (🚀 衝刺：動能狙擊)"
+    return f"{val:.2f}% (💀 超標：嚴守停損)"
 
 def get_rsi_info(val):
-    if val > 70: return f"{val:.2f} (🔥 瘋狂：全民搶進，隨時可能反轉)"
-    return f"{val:.2f} (🚀 動能：追價力道充足，適合順勢)"
+    if val > 70: return f"{val:.2f} (🔥 瘋狂：全民搶進)"
+    return f"{val:.2f} (🚀 動能：追價力足)"
 
 # ==========================================
 # 2. 鐵血左側面板 (右側紀律中心)
 # ==========================================
 with st.sidebar:
-    st.title("🦅 鷹眼-右側順勢版 v13.6")
+    st.title("🦅 鷹眼-右側順勢版 v13.7")
     page = st.radio("📡 戰情導航", ["📊 庫存戰情", "🎯 市場掃描", "➕ 庫存管理"])
     st.divider()
-    
     st.error("🦾 **右側鐵血紀律**")
     st.warning("⚠️ **趨勢轉向，頭也不回！**")
     st.error("💀 **不與趨勢對抗，心魔必斬！**")
     st.success("🎯 **守 SOP 順勢而為！**")
-    st.info("💎 **空頭不接刀，多頭不畏高！**")
 
 # ==========================================
-# 3. 功能實體化：修正 A, B 頁面失效問題
+# 3. 分頁功能實體串接
 # ==========================================
 
-# --- [A] 庫存戰情 (穩定顯示) ---
+# --- [A] 庫存戰情 ---
 if page == "📊 庫存戰情":
-    st.header("📊 右側持股監控 (紅漲綠跌)")
+    st.header("📊 右側持股監控 (損益已修正)")
     cols = st.columns(3)
     for i, s in enumerate(st.session_state.portfolio):
         with cols[i % 3]:
@@ -64,15 +62,13 @@ if page == "📊 庫存戰情":
                     with st.container(border=True):
                         st.subheader(f"{s['name']} ({s['code']})")
                         st.markdown(f"現價：<span style='color:{p_color}; font-size:26px; font-weight:bold;'>{last_p}</span>", unsafe_allow_html=True)
-                        st.markdown(f"總損益：<span style='color:{'red' if total_pnl >= 0 else 'green'}; font-weight:bold;'>{total_pnl:+,}</span>", unsafe_allow_html=True)
-                        st.write(f"🛡️ **順勢停損(MA20)**: {round(s['cost']*0.95, 2)}")
+                        st.markdown(f"總損益：**{total_pnl:+,}**")
+                        st.write(f"🛡️ **鐵血停損**: {round(s['cost']*0.95, 2)}")
             except: st.error(f"{s['code']} 讀取失敗")
 
-# --- [B] 市場掃描 (全樣本 1064 支) ---
+# --- [B] 市場掃描 ---
 elif page == "🎯 市場掃描":
     st.header("🎯 全市場順勢標的掃描 (1064 樣本)")
-    
-    # 掃描變因放在 Sidebar
     with st.sidebar:
         min_vol = st.number_input("🌊 最低成交量 (張)", value=1000)
         target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10)
@@ -98,26 +94,42 @@ elif page == "🎯 市場掃描":
                             res_list.append({"選取": True, "代號": c, "名稱": n, "10日勝率%": round(w10, 2), "收盤價": round(df['Close'].iloc[-1], 2)})
                 except: continue
             st.session_state.scan_results = pd.DataFrame(res_list)
-            status.success(f"掃描完成！找到 {len(res_list)} 檔標的。")
-        except: st.error("連網清單失敗。")
+            status.success(f"掃描完成！找到 {len(res_list)} 檔。")
+        except: st.error("連網失敗。")
 
     if st.session_state.scan_results is not None:
         edited_df = st.data_editor(st.session_state.scan_results, hide_index=True)
-        if st.button("🏆 執行深度 AI 評測"):
+        if st.button("🏆 執行深度評測"):
             deep_list = []
-            selected = edited_df[edited_df["選取"] == True]
-            for _, row in selected.iterrows():
+            for _, row in edited_df[edited_df["選取"] == True].iterrows():
                 try:
                     df_all = yf.Ticker(f"{row['代號']}.TW").history(period="1y")
                     close = df_all['Close']
                     l60, h60 = close.tail(60).min(), close.tail(60).max()
-                    rank = ((close.iloc[-1] - l60) / (h60 - l60)) * 100 if h60 != l60 else 50
-                    # RSI & MACD 運算...
-                    deep_list.append({"名稱": row['名稱'], "代號": row['代號'], "位階(順勢點)": get_rank_info(rank), "10日勝率%": row['10日勝率%'], "🛡️ 鐵血停損": round(row['收盤價']*0.95, 2), "🎯 停利": round(row['收盤價']*1.1, 2)})
+                    rank = ((close.iloc[-1] - l60) / (h60 - l60)) * 100
+                    deep_list.append({"名稱": row['名稱'], "代號": row['代號'], "順勢點位階": get_rank_info(rank), "10日勝率%": row['10日勝率%'], "🛡️ 鐵血停損": round(row['收盤價']*0.95, 2)})
                 except: continue
             st.table(pd.DataFrame(deep_list))
 
-# --- [C] 庫存管理 ---
+# --- [C] 庫存管理 (核心修復) ---
 elif page == "➕ 庫存管理":
-    # 保持原有的增刪邏輯與 st.rerun()
-    pass
+    st.header("➕ 庫存名單優化")
+    with st.form("add_form", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        code = c1.text_input("代號")
+        name = c2.text_input("名稱")
+        cost = c3.number_input("成本", value=0.0)
+        shares = c4.number_input("張數", value=1)
+        if st.form_submit_button("確認存入持股"):
+            if code and name:
+                st.session_state.portfolio.append({"code": code, "name": name, "cost": cost, "shares": shares*1000})
+                st.success(f"已新增 {name}")
+                st.rerun()
+    
+    st.divider()
+    for idx, s in enumerate(st.session_state.portfolio):
+        col1, col2 = st.columns([5, 1])
+        col1.write(f"**{s['name']} ({s['code']})** | 成本: {s['cost']} | {int(s['shares']/1000)} 張")
+        if col2.button("🗑️ 刪除", key=f"del_{idx}"):
+            st.session_state.portfolio.pop(idx)
+            st.rerun()
