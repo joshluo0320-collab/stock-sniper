@@ -6,11 +6,10 @@ import requests
 from io import StringIO
 
 # ==========================================
-# 0. 核心配置與快取修復
+# 0. 核心配置與環境設定
 # ==========================================
 st.set_page_config(page_title="鷹眼戰術中心", page_icon="🦅", layout="wide")
 
-# 初始化：這部分代碼若傳給別人，他們會看到初始值，但後續操作不共通
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = [
         {"code": "2337", "name": "旺宏", "cost": 32.35, "shares": 1000},
@@ -20,10 +19,21 @@ if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
 # ==========================================
-# 1. 鐵血導航面板 (紀律口號)
+# 1. 鐵血教條與白話指標邏輯
 # ==========================================
+def get_rank_info(val):
+    if val < 20: return f"{val:.2f}% (💎 底部：極低風險)"
+    if val < 50: return f"{val:.2f}% (📈 穩健：趨勢成形)"
+    if val < 80: return f"{val:.2f}% (🚀 衝刺：熱度高漲)"
+    return f"{val:.2f}% (💀 超標：登頂危險)"
+
+def get_rsi_info(val):
+    if val > 70: return f"{val:.2f} (🔥 瘋狂：全民瘋搶)"
+    if val > 50: return f"{val:.2f} (🚀 動能：有人追價)"
+    return f"{val:.2f} (🧊 觀望：熱度一般)"
+
 with st.sidebar:
-    st.title("🦅 鷹眼戰術中心 v13.1")
+    st.title("🦅 鷹眼戰術中心 v13.2")
     page = st.radio("📡 戰情導航", ["📊 庫存戰情", "🎯 市場掃描", "➕ 庫存管理"])
     st.divider()
     st.error("🦾 **鐵血紀律中心**")
@@ -32,10 +42,12 @@ with st.sidebar:
     st.success("🎯 **守 SOP 是唯一勝算！**")
 
 # ==========================================
-# 2. 庫存戰情 (精確損益 + 小數點修復)
+# 2. 分頁實體化邏輯
 # ==========================================
+
+# --- 分頁 1: 庫存戰情 (精確損益) ---
 if page == "📊 庫存戰情":
-    st.header("📊 持股監控 (損益倍數已修正)")
+    st.header("📊 即時損益監控 (精確到小數點2位)")
     cols = st.columns(3)
     for i, s in enumerate(st.session_state.portfolio):
         with cols[i % 3]:
@@ -44,33 +56,28 @@ if page == "📊 庫存戰情":
                 h = t.history(period="5d")
                 if not h.empty:
                     last_p = round(float(h.iloc[-1]['Close']), 2)
-                    # 損益公式：(現價 - 成本) * 總股數
                     total_pnl = round((last_p - s['cost']) * s['shares'], 2)
-                    p_color = "red" if last_p >= h.iloc[-2]['Close'] else "green"
+                    pnl_color = "red" if total_pnl >= 0 else "green"
                     with st.container(border=True):
                         st.subheader(f"{s['name']} ({s['code']})")
-                        st.markdown(f"現價：<span style='color:{p_color}; font-size:26px; font-weight:bold;'>{last_p}</span>", unsafe_allow_html=True)
-                        st.markdown(f"總損益：<span style='color:{'red' if total_pnl >= 0 else 'green'}; font-weight:bold;'>{total_pnl:+,}</span>", unsafe_allow_html=True)
-                        st.write(f"持有：{int(s['shares']/1000)} 張")
+                        st.markdown(f"現價：**{last_p}**")
+                        st.markdown(f"總損益：<span style='color:{pnl_color}; font-weight:bold;'>{total_pnl:+,}</span>", unsafe_allow_html=True)
+                        st.write(f"🛡️ **停損**: {round(s['cost']*0.95, 2)} | 🎯 **停利**: {round(s['cost']*1.1, 2)}")
             except: st.error(f"{s['code']} 讀取失敗")
 
-# ==========================================
-# 3. 市場掃描 (1064 支全樣本 + 實體按鈕修復)
-# ==========================================
+# --- 分頁 2: 市場掃描 (雙按鈕實體化) ---
 elif page == "🎯 市場掃描":
     st.header("🎯 全市場 1000+ 樣本自動掃描")
     
-    # 參數放在 Sidebar
     with st.sidebar:
         st.divider()
         min_vol = st.number_input("🌊 最低成交量 (張)", value=1000)
         target_rise = st.slider("🎯 目標漲幅 (%)", 1, 30, 10)
         min_win10 = st.slider("🔥 最低10日勝率 (%)", 0, 100, 40)
 
-    if st.button("🚀 啟動掃描", type="primary"):
+    if st.button("🚀 啟動全市場掃擊", type="primary"):
         res_list = []
         try:
-            # 獲取 1064 支清單
             url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
             df_list = pd.read_html(requests.get(url, verify=False, timeout=10).text)[0]
             df_list.columns = df_list.iloc[0]
@@ -86,13 +93,69 @@ elif page == "🎯 市場掃描":
                         ret10 = (df['Close'].shift(-10) - df['Close']) / df['Close'] * 100
                         w10 = (ret10 >= target_rise).sum() / ret10.count() * 100
                         if w10 >= min_win10:
-                            res_list.append({"選取": True, "代號": c, "名稱": n, "收盤價": round(df['Close'].iloc[-1], 2), "10日勝率%": round(w10, 2)})
+                            ret5 = (df['Close'].shift(-5) - df['Close']) / df['Close'] * 100
+                            res_list.append({
+                                "選取": True, "代號": c, "名稱": n, 
+                                "10日勝率%": round(w10, 2), 
+                                "5日勝率%": round((ret5 >= target_rise).sum() / ret5.count() * 100, 2),
+                                "收盤價": round(df['Close'].iloc[-1], 2)
+                            })
                 except: continue
             st.session_state.scan_results = pd.DataFrame(res_list)
-            status.success(f"完成！找到 {len(res_list)} 檔。")
-        except Exception as e:
-            st.error(f"連線失敗：{e}")
+            status.success(f"掃描完成！找到 {len(res_list)} 檔符合條件標的。")
+        except Exception as e: st.error(f"連線失敗：{e}")
 
     if st.session_state.scan_results is not None:
-        st.subheader("📋 深度決策表格")
-        st.data_editor(st.session_state.scan_results, hide_index=True)
+        st.subheader("📋 初步掃描戰果")
+        edited_df = st.data_editor(st.session_state.scan_results, hide_index=True, use_container_width=True)
+        
+        # --- 深度評測按鈕 (確保在此層級) ---
+        if st.button("🏆 執行深度 AI 表格評測 (包含位階與白話解釋)"):
+            st.divider()
+            deep_list = []
+            selected = edited_df[edited_df["選取"] == True]
+            for _, row in selected.iterrows():
+                try:
+                    df_all = yf.Ticker(f"{row['代號']}.TW").history(period="1y")
+                    close = df_all['Close']
+                    l60, h60 = close.tail(60).min(), close.tail(60).max()
+                    rank = ((close.iloc[-1] - l60) / (h60 - l60)) * 100 if h60 != l60 else 50
+                    # RSI 計算
+                    delta = close.diff(); g = delta.where(delta > 0, 0).rolling(14).mean(); l = -delta.where(delta < 0, 0).rolling(14).mean()
+                    rsi = (100 - (100 / (1 + g/l))).iloc[-1]
+                    # MACD 計算
+                    ema12 = close.ewm(span=12).mean(); ema26 = close.ewm(span=26).mean(); dif = ema12 - ema26; macd = dif.ewm(span=9).mean(); osc = dif - macd
+                    
+                    deep_list.append({
+                        "名稱": row['名稱'], "代號": row['代號'], "現價": row['收盤價'],
+                        "10日勝率%": f"{row['10日勝率%']}%", "5日勝率%": f"{row['5日勝率%']}%",
+                        "位階(貴不貴)": get_rank_info(rank),
+                        "力道(熱不熱)": get_rsi_info(rsi),
+                        "油門(MACD)": "⛽ 滿油衝刺" if osc.iloc[-1] > 0 else "🛑 減速待機",
+                        "🛡️ 鐵血停損": round(row['收盤價'] * 0.95, 2),
+                        "🎯 目標停利": round(row['收盤價'] * 1.1, 2)
+                    })
+                except: continue
+            
+            if deep_list:
+                final_df = pd.DataFrame(deep_list).sort_values(by="10日勝率%", ascending=False)
+                st.subheader("🥇 深度決策表格 (按參考價值排序)")
+                st.table(final_df)
+            else: st.warning("請先在上方表格中勾選標的。")
+
+# --- 分頁 3: 庫存管理 ---
+elif page == "➕ 庫存管理":
+    st.header("➕ 庫存名單優化")
+    with st.form("add_form", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        code, name = c1.text_input("代號"), c2.text_input("名稱")
+        cost, shares = c3.number_input("成本", value=0.0), c4.number_input("張數", value=1)
+        if st.form_submit_button("執行存入"):
+            st.session_state.portfolio.append({"code": code, "name": name, "cost": cost, "shares": shares*1000})
+            st.rerun()
+    st.divider()
+    for idx, s in enumerate(st.session_state.portfolio):
+        col1, col2 = st.columns([5, 1])
+        col1.write(f"**{s['name']} ({s['code']})** | 成本: {s['cost']} | {int(s['shares']/1000)} 張")
+        if col2.button("🗑️ 刪除", key=f"del_{idx}"):
+            st.session_state.portfolio.pop(idx); st.rerun()
