@@ -4,55 +4,54 @@ import pandas as pd
 import requests
 
 # ==========================================
-# 0. 核心配置與全局初始化 (防遺失機制)
+# 0. 核心配置與全局狀態 (穩定鎖定)
 # ==========================================
-st.set_page_config(page_title="鷹眼資產戰情室 v17.1", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="鷹眼資產戰情室 v18.0", page_icon="🦅", layout="wide")
 
-# 初始化所有狀態，防止分頁切換時 AttributeError 或數據消失
-if 'initial_cash' not in st.session_state:
-    st.session_state.initial_cash = 300000.00
-if 'current_cash' not in st.session_state:
-    st.session_state.current_cash = 300000.00
+# 初始化所有狀態，確保切換分頁不遺失
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = [
         {"code": "2337", "name": "旺宏", "cost": 32.35, "shares": 1000},
         {"code": "4916", "name": "事欣科", "cost": 64.0, "shares": 2000}
     ]
+if 'initial_cash' not in st.session_state:
+    st.session_state.initial_cash = 300000.00 # 起始資金
+if 'current_cash' not in st.session_state:
+    st.session_state.current_cash = 300000.00 # 現有現金
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = None
 
-FEE_RATE = 0.001425
+FEE_RATE = 0.001425 #
 TAX_RATE = 0.003
 
 # ==========================================
-# 1. 左側面板：手動過濾參數 (雙模連動)
+# 1. 導航面板
 # ==========================================
 with st.sidebar:
-    st.title("🦅 戰情中心 v17.1")
+    st.title("🦅 戰情中心 v18.0")
     page = st.radio("📡 系統導航", ["📈 資產總覽", "🎯 策略篩選", "➕ 庫存管理"])
     st.divider()
     trade_mode = st.radio("⚔️ 戰術模式", ["右側順勢 (10D)", "左側逆勢 (縮時反轉)"])
     st.divider()
     
-    # 策略參數手動調整欄位
-    if trade_mode == "右側順勢 (10D)":
-        target_win = st.slider("🎯 10D 勝率門檻 (%)", 0, 100, 60)
-        min_rank = st.slider("📈 最低位階 (Rank %)", 0, 100, 40)
-    else:
-        target_win = st.slider("🛡️ 22D 築底勝率 (%)", 0, 100, 60)
-        max_rank = st.slider("💎 最高位階 (Rank %)", 0, 100, 15)
-        neg_bias = st.slider("📉 負乖離率門檻 (%)", -20, 0, -8)
+    # [功能 1] 手動輸入/更新資產部分 (回歸)
+    st.subheader("💰 資產手動校正")
+    new_init = st.number_input("起始總資金", value=float(st.session_state.initial_cash), format="%.2f")
+    new_cash = st.number_input("手頭可用現金", value=float(st.session_state.current_cash), format="%.2f")
+    if st.button("確認同步校正"):
+        st.session_state.initial_cash = round(new_init, 2)
+        st.session_state.current_cash = round(new_cash, 2)
+        st.rerun()
 
 # ==========================================
-# 2. 分頁功能：資產總覽 (修復顯示問題)
+# 2. 分頁功能：資產總覽 (股票現價 + 現金)
 # ==========================================
 if page == "📈 資產總覽":
     st.header("📈 實體資產累積面板")
     
     total_mkt_val = 0.0
-    details = []
+    stock_list = []
     
-    # 強制獲取現價計算總資產
     for s in st.session_state.portfolio:
         try:
             t = yf.Ticker(f"{s['code']}.TW")
@@ -60,78 +59,92 @@ if page == "📈 資產總覽":
             p = round(float(h['Close'].iloc[-1]), 2) if not h.empty else s['cost']
             mv = round(p * s['shares'], 2)
             total_mkt_val += mv
-            profit = (mv * (1-FEE_RATE-TAX_RATE)) - (s['cost'] * s['shares'] * (1+FEE_RATE))
-            details.append({"名稱": s['name'], "持股": s['shares'], "成本": f"{s['cost']:.2f}", "現價": f"{p:.2f}", "預估損益": f"{profit:+,.0f}"})
+            # 計算損益
+            pnl = (mv * (1-FEE_RATE-TAX_RATE)) - (s['cost'] * s['shares'] * (1+FEE_RATE))
+            stock_list.append({"名稱": s['name'], "代號": s['code'], "成本": f"{s['cost']:.2f}", "現價": f"{p:.2f}", "預估損益": f"{pnl:+,.0f}"})
         except: continue
 
-    net_total = round(st.session_state.current_cash + total_mkt_val, 2)
-    roi = round(((net_total - st.session_state.initial_cash) / st.session_state.initial_cash) * 100, 2)
+    net_assets = round(st.session_state.current_cash + total_mkt_val, 2)
+    roi = round(((net_assets - st.session_state.initial_cash) / st.session_state.initial_cash) * 100, 2)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 總資產淨值", f"{net_total:,.2f}", f"{roi:+.2f}%")
-    c2.metric("💵 可用現金", f"{st.session_state.current_cash:,.2f}")
-    c3.metric("💹 股票市值", f"{total_mkt_val:,.2f}")
+    c1.metric("💰 總資產淨值", f"{net_assets:,.2f}", f"{roi:+.2f}%")
+    c2.metric("💵 可用現金部位", f"{st.session_state.current_cash:,.2f}")
+    c3.metric("💹 股票市值加總", f"{total_mkt_val:,.2f}")
     
-    if details:
-        st.table(pd.DataFrame(details))
+    if stock_list: st.table(pd.DataFrame(stock_list))
 
 # ==========================================
-# 3. 分頁功能：策略篩選 (修復 1064 支全樣本掃描)
+# 3. 分頁功能：策略篩選 (最初勝率版本回歸)
 # ==========================================
 elif page == "🎯 策略篩選":
-    st.header(f"🎯 {trade_mode} 全樣本掃描")
+    st.header(f"🎯 {trade_mode} 鷹眼篩選系統")
+    
+    # 預算過濾條件
     max_budget = st.number_input("💸 單筆預算上限", value=float(st.session_state.current_cash), format="%.2f")
 
-    if st.button("🚀 啟動 1064 支實體掃描", type="primary"):
-        res_list = []
+    if st.button("🚀 啟動 1064 支全樣本掃描", type="primary"):
+        res = []
         try:
-            # 確保獲取最新上市股票清單 (ESVUFR)
+            # 抓取上市清單 (最初版本邏輯)
             url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-            raw_data = pd.read_html(requests.get(url, verify=False, timeout=15).text)[0]
-            raw_data.columns = raw_data.iloc[0]
-            # 篩選 4 位數代碼之上市普通股
-            all_stocks = raw_data.iloc[1:][raw_data['CFICode'] == 'ESVUFR']['有價證券代號及名稱'].tolist()
+            df_list = pd.read_html(requests.get(url, verify=False, timeout=15).text)[0]
+            df_list.columns = df_list.iloc[0]
+            stocks = df_list.iloc[1:][df_list['CFICode'] == 'ESVUFR']['有價證券代號及名稱'].tolist()
             
             bar = st.progress(0); status = st.empty()
-            
-            for i, item in enumerate(all_stocks):
+            days = 10 if trade_mode == "右側順勢 (10D)" else 22 # 最初設定週期
+
+            for i, item in enumerate(stocks):
                 code = item.split('\u3000')[0].strip()
                 name = item.split('\u3000')[1].strip()
                 if len(code) != 4: continue
                 
-                status.text(f"掃描中 ({i}/{len(all_stocks)}): {name}({code})")
-                bar.progress((i+1)/len(all_stocks))
+                status.text(f"分析中: {name}({code})")
+                bar.progress((i+1)/len(stocks))
                 
                 try:
                     df = yf.Ticker(f"{code}.TW").history(period="1y")
-                    if df.empty: continue
-                    # 執行參數過濾 (位階、勝率等邏輯)
-                    # ... 篩選通過則加入 res_list
+                    if df.empty or len(df) < 60: continue
+                    
+                    price = round(df['Close'].iloc[-1], 2)
+                    if (price * 1000 * (1+FEE_RATE)) > max_budget: continue # 資金過濾
+
+                    # 最初勝率計算邏輯
+                    returns = (df['Close'].shift(-days) - df['Close']) / df['Close'] * 100
+                    win_rate = (returns >= 10).sum() / returns.count() * 100 # 10天漲10%之機率
+                    
+                    if win_rate >= 40: # 基本門檻
+                        res.append({"代號": code, "名稱": name, "現價": price, "歷史勝率%": round(win_rate, 2)})
                 except: continue
             
-            st.session_state.scan_results = pd.DataFrame(res_list)
-            status.success(f"掃描完成！符合所有嚴苛條件標的共 {len(res_list)} 檔。")
-        except Exception as e:
-            st.error(f"掃描中斷：{e}")
+            st.session_state.scan_results = pd.DataFrame(res)
+            status.success(f"完成！共篩出 {len(res)} 檔高勝率標的。")
+        except Exception as e: st.error(f"掃描出錯: {e}")
 
     if st.session_state.get('scan_results') is not None:
-        st.dataframe(st.session_state.scan_results, use_container_width=True)
+        st.subheader("🔍 二次深度評測結果")
+        # 顯示最初版本之建議：進場、停損、停利
+        df_eval = st.session_state.scan_results.copy()
+        df_eval['🛡️ 停損價'] = (df_eval['現價'] * 0.95).round(2)
+        df_eval['🎯 第一停利'] = (df_eval['現價'] * 1.10).round(2)
+        st.dataframe(df_eval, use_container_width=True)
 
-# --- [C] 庫存管理 (直接刪除與手動結帳) ---
+# --- [C] 庫存管理 (直接刪除機制回歸) ---
 elif page == "➕ 庫存管理":
-    st.header("➕ 庫存異動與金流校正")
+    st.header("➕ 庫存與金流精確校正")
     for idx, s in enumerate(st.session_state.portfolio):
         with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-            c1.write(f"**{s['name']}** ({s['code']}) | 成本: {s['cost']:.2f}")
-            sp = c2.number_input(f"結帳單價", key=f"sp_{idx}", value=s['cost'], format="%.2f")
+            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+            col1.write(f"**{s['name']}** ({s['code']}) | 成本: {s['cost']:.2f}")
+            actual_p = col2.number_input(f"手動賣出價", key=f"ap_{idx}", value=s['cost'], format="%.2f")
             
-            if c3.button("賣出結帳", key=f"s_{idx}"):
-                st.session_state.current_cash += round(sp * s['shares'] * (1-FEE_RATE-TAX_RATE), 2)
+            if col3.button("賣出結帳", key=f"sell_{idx}"):
+                st.session_state.current_cash += round(actual_p * s['shares'] * (1-FEE_RATE-0.003), 2)
                 st.session_state.portfolio.pop(idx)
                 st.rerun()
             
-            # [功能修復] 直接刪除存股機制
-            if c4.button("🗑️ 直接刪除", key=f"d_{idx}"):
+            # [功能回歸] 直接刪除存股機制
+            if col4.button("🗑️ 直接刪除", key=f"del_{idx}"):
                 st.session_state.portfolio.pop(idx)
                 st.rerun()
