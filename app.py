@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import ta
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
@@ -16,10 +15,10 @@ if 'cash' not in st.session_state:
     st.session_state.cash = 240000  # 用戶現有現金
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = {
-        '2337.TW': {'cost': 0, 'shares': 1000}  # 旺宏 1 張 (成本暫設0，可手動修正)
+        '2337.TW': {'cost': 0, 'shares': 1000}  # 旺宏 1 張
     } 
 
-# 預設觀察清單 (您可以隨時在此擴充，例如加入 0050 成分股)
+# 預設觀察清單
 WATCHLIST = [
     '2330.TW', '2337.TW', '2454.TW', '2303.TW', '3034.TW', 
     '3035.TW', '3037.TW', '2379.TW', '3008.TW', '3443.TW',
@@ -29,19 +28,27 @@ WATCHLIST = [
 ]
 
 # ============================================
-# 2. 工具函數 (Utility Functions)
+# 2. 工具函數 (內建計算 RSI/布林通道，無需額外安裝 ta)
 # ============================================
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 def get_stock_data(ticker, period="6mo"):
     """下載股價數據並計算基礎指標"""
     try:
+        # 下載數據
         df = yf.download(ticker, period=period, progress=False)
         if df.empty: return None
         
-        # 處理 MultiIndex Column 問題 (yfinance 新版相容)
+        # 處理 MultiIndex Column 問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
-        # 基礎技術指標
+        # 基礎均線
         df['MA5'] = df['Close'].rolling(window=5).mean()
         df['MA10'] = df['Close'].rolling(window=10).mean()
         df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
@@ -49,13 +56,14 @@ def get_stock_data(ticker, period="6mo"):
         df['MA240'] = df['Close'].rolling(window=240).mean() # 年線
         df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
         
-        # RSI
-        df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
+        # 手動計算 RSI (移除 ta 依賴)
+        df['RSI'] = calculate_rsi(df['Close'])
         
-        # Bollinger Bands
-        bb_indicator = ta.volatility.BollingerBands(close=df['Close'], window=20, window_dev=2)
-        df['BB_High'] = bb_indicator.bollinger_hband()
-        df['BB_Low'] = bb_indicator.bollinger_lband()
+        # 手動計算布林通道 (移除 ta 依賴)
+        df['BB_Mid'] = df['Close'].rolling(window=20).mean()
+        df['BB_Std'] = df['Close'].rolling(window=20).std()
+        df['BB_High'] = df['BB_Mid'] + (2 * df['BB_Std'])
+        df['BB_Low'] = df['BB_Mid'] - (2 * df['BB_Std'])
         
         return df
     except Exception as e:
@@ -70,7 +78,6 @@ def analyze_strategy(df, mode, params):
     if df is None or len(df) < 30: return False, "數據不足", 0
 
     last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
     ticker_price = last_row['Close']
     
     # --- 共同篩選 (價格與成交量) ---
@@ -80,7 +87,6 @@ def analyze_strategy(df, mode, params):
         return False, "成交量不足", 0
 
     reason = ""
-    score = 0
     
     # --- 右側順勢 (趨勢交易) ---
     if mode == 'Right':
@@ -90,7 +96,7 @@ def analyze_strategy(df, mode, params):
         # 2. 攻擊量能
         vol_ok = last_row['Volume'] > last_row['Vol_MA5'] * params['vol_burst_ratio']
         
-        # 3. 位階判斷 (剛起漲 vs 中段 vs 末路)
+        # 3. 位階判斷
         bias_year = (last_row['Close'] - last_row['MA240']) / last_row['MA240'] * 100
         stage = "未知"
         if 0 < bias_year <= 10: stage = "剛起漲 (初升段)"
@@ -106,7 +112,9 @@ def analyze_strategy(df, mode, params):
     # --- 左側逆勢 (抄底交易) ---
     elif mode == 'Left':
         # 1. 極端超跌 (RSI)
-        rsi_oversold = last_row['RSI'] < params['rsi_limit']
+        # 確保 RSI 不是 NaN
+        rsi_val = last_row['RSI'] if not pd.isna(last_row['RSI']) else 50
+        rsi_oversold = rsi_val < params['rsi_limit']
         
         # 2. 乖離率 (負乖離過大)
         bias_20 = (last_row['Close'] - last_row['MA20']) / last_row['MA20'] * 100
@@ -115,14 +123,14 @@ def analyze_strategy(df, mode, params):
         # 3. 底部訊號 (布林下軌 or 長下影線)
         touch_bb_low = last_row['Close'] <= last_row['BB_Low'] * 1.02
         
-        # 簡單判斷下影線 (開盤收盤接近，但在低檔)
+        # 簡單判斷下影線
         body = abs(last_row['Close'] - last_row['Open'])
         lower_shadow = min(last_row['Close'], last_row['Open']) - last_row['Low']
         hammer = (lower_shadow > body * 2) and rsi_oversold
         
         if (rsi_oversold and bias_ok) or hammer:
             signal_type = "長下影線探底" if hammer else "指標嚴重超賣"
-            reason = f"【{signal_type}】RSI({last_row['RSI']:.1f}) 進入鈍化區，且負乖離達 {bias_20:.1f}%，醞釀 10% 反彈。"
+            reason = f"【{signal_type}】RSI({rsi_val:.1f}) 進入鈍化區，且負乖離達 {bias_20:.1f}%，醞釀 10% 反彈。"
             return True, reason, ticker_price
 
     return False, "", 0
@@ -135,7 +143,6 @@ st.sidebar.header("🕹️ 交易控制台")
 # 3.1 資產配置更新
 with st.sidebar.expander("💰 資產數據校正", expanded=False):
     st.session_state.cash = st.number_input("可用現金 (TWD)", value=st.session_state.cash, step=1000)
-    # 這裡可以做更複雜的持股編輯，簡單起見先顯示
     st.write(f"目前持股: 旺宏 {st.session_state.portfolio.get('2337.TW', {}).get('shares', 0)} 股")
 
 # 3.2 策略選擇
@@ -158,7 +165,6 @@ params = {
 if strategy_mode == "右側順勢 (趨勢攻擊)":
     st.sidebar.info("🚀 尋找：站上均線、帶量突破、法人轉買的標的")
     params['vol_burst_ratio'] = st.sidebar.slider("爆量倍數 (成交量 > 5日均量 X倍)", 1.0, 3.0, 1.2)
-    # 這裡可以加入勝率門檻的模擬參數
     win_rate_threshold = st.sidebar.slider("模擬歷史勝率門檻 (%)", 50, 90, 60)
 
 else: # 左側逆勢
@@ -200,7 +206,7 @@ net_worth = st.session_state.cash + total_stock_value
 # 顯示關鍵指標 (KPI)
 col1, col2, col3 = st.columns(3)
 col1.metric("總資產淨值", f"${net_worth:,}", delta=None)
-col2.metric("可用現金 (銀彈)", f"${st.session_state.cash:,}", delta="已入帳 (原事欣科資金)")
+col2.metric("可用現金 (銀彈)", f"${st.session_state.cash:,}", delta="已入帳")
 col3.metric("證券市值 (旺宏)", f"${int(total_stock_value):,}")
 
 # 持股細節表
@@ -242,7 +248,6 @@ if st.button("開始掃描 (執行SOP)", type="primary"):
         res_df = pd.DataFrame(results)
         st.success(f"掃描完成！共發現 {len(res_df)} 檔符合條件的標的。")
         
-        # 互動式表格
         st.dataframe(
             res_df,
             column_config={
@@ -250,26 +255,13 @@ if st.button("開始掃描 (執行SOP)", type="primary"):
             },
             use_container_width=True
         )
-        
-        st.markdown("### 📝 操作建議 SOP")
-        if "右側" in strategy_mode:
-            st.markdown("""
-            * **進場策略**：建議於盤中突破今日高點時切入，資金部位控制在 30%。
-            * **防守點**：今日長紅棒低點或 10 日均線。
-            """)
-        else:
-            st.markdown("""
-            * **進場策略**：左側交易風險較高，建議分 3 批進場 (3:3:4)。
-            * **獲利目標**：10 日內反彈 10% (至月線壓力區) 即可分批出場。
-            """)
             
     else:
-        st.warning("⚠️ 當前嚴苛條件下，無符合標的。建議：\n1. 放寬「成交量」門檻。\n2. (右側) 降低「勝率/爆量」要求。\n3. (左側) 提高 RSI 容許值 (例如改為 35)。")
+        st.warning("⚠️ 當前條件下無符合標的。請嘗試：\n1. 調整左側面板的「股價範圍」\n2. 放寬「成交量」門檻\n3. 調整策略參數 (例如 RSI 放寬至 35)")
 
-# --- Section C: 即時圖表 (可選) ---
+# --- Section C: 即時圖表 ---
 st.markdown("---")
 st.subheader("📈 重點個股快篩圖 (以旺宏為例)")
-# 預設顯示持股的圖表
 chart_ticker = st.selectbox("選擇查看個股", list(st.session_state.portfolio.keys()) + WATCHLIST)
 chart_df = get_stock_data(chart_ticker)
 
@@ -281,7 +273,11 @@ if chart_df is not None:
                     low=chart_df['Low'], close=chart_df['Close'], name='K線'))
     # 均線
     fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA20'], line=dict(color='orange', width=1), name='月線(20MA)'))
-    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA60'], line=dict(color='green', width=1), name='季線(60MA)'))
     
+    # 布林通道 (如果選左側交易時顯示)
+    if "左側" in strategy_mode:
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_High'], line=dict(color='gray', width=1, dash='dot'), name='布林上軌'))
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['BB_Low'], line=dict(color='gray', width=1, dash='dot'), name='布林下軌'))
+
     fig.update_layout(title=f"{chart_ticker} 走勢圖", xaxis_rangeslider_visible=False, height=400)
     st.plotly_chart(fig, use_container_width=True)
