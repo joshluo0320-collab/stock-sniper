@@ -3,12 +3,11 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import requests
 
 # ============================================
 # 1. 系統初始化
 # ============================================
-st.set_page_config(page_title="個人股市操盤系統 (精準上市版)", layout="wide")
+st.set_page_config(page_title="台股全市場掃描 (上市版)", layout="wide")
 
 if 'cash' not in st.session_state:
     st.session_state.cash = 240000  
@@ -18,56 +17,51 @@ if 'portfolio' not in st.session_state:
     }
 
 # ============================================
-# 2. 核心功能：抓取「證交所」真實清單
+# 2. 核心功能：抓取證交所真實清單 (含中文名)
 # ============================================
-
-@st.cache_data(ttl=86400) # 每天更新一次即可
-def get_real_twse_list():
+@st.cache_data(ttl=86400)
+def get_twse_stock_list():
     """
-    直接從台灣證券交易所 (TWSE) 網站抓取「上市公司」清單
-    排除上櫃、興櫃與權證，確保只有真正的上市股票。
+    從台灣證券交易所 (TWSE) 抓取真實上市公司清單
+    回傳: (tickers_list, names_dict)
     """
     try:
-        # 證交所「上市公司」清單 URL (Mode=2 代表上市)
+        # 證交所「上市公司」網址 (Mode=2)
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         
-        # 讀取 HTML 表格
+        # 讀取 HTML 表格 (encoding='cp950' 是為了解析繁體中文)
         dfs = pd.read_html(url, encoding='cp950')
         df = dfs[0]
         
-        # 整理欄位 (第一列通常是標頭)
+        # 整理欄位 (前兩列通常是雜訊，設第一列為 Header)
         df.columns = df.iloc[0]
         df = df.iloc[1:]
         
-        # 篩選：只留「股票」類別 (排除 ETF、權證、特別股)
-        # 證交所格式：有價證券別 = '股票'
-        df_stock = df[df['有價證券別'] == '股票']
+        # 篩選：有價證券別必須是「股票」 (排除 ETF, 權證, 特別股)
+        df = df[df['有價證券別'] == '股票']
         
-        # 提取代碼與名稱
-        # 格式通常是 "2330 台積電"，我們切開來
         tickers = []
         names_map = {}
         
-        for index, row in df_stock.iterrows():
+        for index, row in df.iterrows():
             code_name = row['有價證券代號及名稱']
-            if isinstance(code_name, str):
-                parts = code_name.split()
-                if len(parts) >= 2:
-                    code = parts[0]
-                    name = parts[1]
+            # 格式通常是 "2330 台積電"
+            parts = code_name.split()
+            if len(parts) >= 2:
+                code = parts[0]
+                name = parts[1]
+                
+                # 確保是 4 碼數字 (防呆)
+                if len(code) == 4 and code.isdigit():
+                    ticker = f"{code}.TW"
+                    tickers.append(ticker)
+                    names_map[ticker] = name
                     
-                    # 再次確認是 4 碼數字 (排除一些怪異代碼)
-                    if len(code) == 4 and code.isdigit():
-                        ticker = f"{code}.TW"
-                        tickers.append(ticker)
-                        names_map[ticker] = name
-                        
         return tickers, names_map
         
     except Exception as e:
-        # 萬一證交所網站掛了，啟用備用清單 (常見上市權值股)
-        fallback_tickers = [f"{i}.TW" for i in range(1101, 9999) if i % 10 < 5] # 簡單過濾
-        return fallback_tickers[:100], {}
+        st.error(f"無法從證交所抓取清單，請確認網路連線。錯誤: {e}")
+        return [], {}
 
 def calculate_indicators(df):
     """計算技術指標"""
@@ -80,11 +74,10 @@ def calculate_indicators(df):
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # 均線 (MA)
-    df['MA5'] = df['Close'].rolling(window=5).mean()
+    # 均線
     df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
     
-    # 布林通道
+    # 布林通道 (左側交易用)
     df['BB_Mid'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
     df['BB_Low'] = df['BB_Mid'] - (2 * df['BB_Std'])
@@ -97,30 +90,34 @@ def calculate_indicators(df):
 # ============================================
 # 3. 篩選邏輯
 # ============================================
-def analyze_stock(ticker, name, df, mode, params):
+def analyze_stock(ticker, stock_name, df, mode, params):
     if df is None or len(df) < 30: return False, "", 0
 
     last = df.iloc[-1]
     price = last['Close']
     
-    # 0. 殭屍股與預算過濾
+    # 0. 共同門檻：成交量 & 價格
     if last['Volume'] < params['min_volume']:
         return False, "量太小", 0
     if not (params['price_min'] <= price <= params['price_max']):
         return False, "價格不符", 0
 
     reason = ""
-    display_name = name if name else ticker
-    
+    # 確保顯示中文名稱
+    display_name = f"{stock_name}({ticker.replace('.TW', '')})"
+
     # --- A. 右側交易 (順勢) ---
     if mode == 'Right':
+        # 1. 趨勢：股價在月線上
         trend_ok = price > last['MA20']
         
+        # 2. 勝率：過去10天收紅天數
         recent = df.iloc[-10:]
         up_days = sum(recent['Close'] >= recent['Open'])
         win_rate = (up_days / 10) * 100
         win_rate_ok = win_rate >= params['min_win_rate']
         
+        # 3. 量能：今日量能放大
         if pd.isna(last['Vol_MA5']) or last['Vol_MA5'] == 0:
             vol_ratio = 1.0
         else:
@@ -133,9 +130,11 @@ def analyze_stock(ticker, name, df, mode, params):
 
     # --- B. 左側交易 (逆勢) ---
     elif mode == 'Left':
+        # 1. RSI 超賣
         rsi_val = last['RSI'] if not pd.isna(last['RSI']) else 50
         oversold = rsi_val < params['rsi_threshold']
         
+        # 2. 負乖離 (便宜程度)
         bias = (price - last['MA20']) / last['MA20'] * 100
         cheap_enough = bias < -params['bias_threshold']
         
@@ -160,8 +159,8 @@ strategy_mode = st.sidebar.radio("交易策略", ["右側交易 (順勢追漲)",
 
 st.sidebar.markdown("### 📊 篩選條件")
 
-price_range = st.sidebar.slider("股價範圍", 10, 200, (20, 150))
-min_vol = st.sidebar.number_input("最低成交量 (張)", value=1000, step=500)
+price_range = st.sidebar.slider("股價範圍 (配合預算)", 10, 240, (20, 150))
+min_vol = st.sidebar.number_input("最低成交量 (張)", value=1000, step=500, help="低於此量視為殭屍股")
 
 params = {
     'price_min': price_range[0],
@@ -181,13 +180,12 @@ else:
 # ============================================
 # 5. 主畫面執行
 # ============================================
-st.title("📈 個人股市操盤系統")
-st.caption("資料來源：證交所 (TWSE) 真實上市公司名單")
+st.title("📈 台股全市場掃描系統")
+st.caption("資料來源：台灣證券交易所 (TWSE) 上市普通股清單")
 
 # 資產總覽
 total_stock_val = 0
 try:
-    # 簡單計算庫存市值
     t = yf.Ticker("2337.TW")
     hist = t.history(period="1d")
     if not hist.empty:
@@ -201,53 +199,67 @@ col2.metric("庫存市值 (旺宏)", f"${int(total_stock_val):,}")
 
 st.markdown("---")
 
-if st.button("開始掃描 (精準上市清單)", type="primary"):
+if st.button("開始掃描 (上市股票)", type="primary"):
     
-    with st.spinner("正在連線證交所抓取最新上市股票名單..."):
-        all_tickers, names_map = get_real_twse_list()
+    with st.spinner("正在從證交所抓取最新股票清單..."):
+        # 1. 取得真實清單
+        all_tickers, names_map = get_twse_stock_list()
         
-    st.info(f"成功取得 {len(all_tickers)} 檔「上市」股票 (已過濾掉上櫃/興櫃)。開始分析...")
+    if not all_tickers:
+        st.stop()
+        
+    st.info(f"成功取得 {len(all_tickers)} 檔上市股票。開始分析...")
     
     results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # 批次下載 (Batch)
+    # 2. 批次下載 (每次 50 檔，避免記憶體爆掉)
     chunk_size = 50
     chunks = [all_tickers[i:i + chunk_size] for i in range(0, len(all_tickers), chunk_size)]
     
     for i, chunk in enumerate(chunks):
         progress_bar.progress((i + 1) / len(chunks))
-        status_text.text(f"分析進度: {i+1}/{len(chunks)} 批")
+        status_text.text(f"掃描進度: {i+1}/{len(chunks)} 批 (目前分析至 {chunk[0]})")
         
         try:
+            # 批次下載數據
             batch_data = yf.download(chunk, period="2mo", group_by='ticker', progress=False)
             
             for ticker in chunk:
                 try:
+                    # 提取單一股票資料
                     if len(chunk) == 1: df = batch_data
-                    else: df = batch_data[ticker]
+                    else: df = batch_data.get(ticker)
                     
+                    if df is None or df.empty: continue
+                    
+                    # 清理 MultiIndex 欄位
                     if isinstance(df.columns, pd.MultiIndex):
                         df = df.droplevel(0, axis=1)
                     
-                    if 'Close' not in df.columns or df.empty: continue
+                    # 資料清洗
+                    if 'Close' not in df.columns: continue
                     df = df.dropna(subset=['Close'])
                     
+                    # 計算指標
                     df = calculate_indicators(df)
                     
-                    mode_key = "Right" if "右側" in strategy_mode else "Left"
-                    stock_name = names_map.get(ticker, ticker)
+                    # 取得中文名稱
+                    ch_name = names_map.get(ticker, ticker)
                     
-                    is_match, reason, price = analyze_stock(ticker, stock_name, df, mode_key, params)
+                    # 策略分析
+                    mode_key = "Right" if "右側" in strategy_mode else "Left"
+                    is_match, reason, price = analyze_stock(ticker, ch_name, df, mode_key, params)
                     
                     if is_match:
                         buy_status = "✅ 可買" if price * 1000 <= st.session_state.cash else "❌ 資金不足"
                         results.append({
-                            "代碼": ticker,
+                            "代號": ticker.replace('.TW', ''),
+                            "名稱": ch_name,
                             "現價": round(price, 2),
-                            "分析結果": reason,
-                            "資金檢核": buy_status
+                            "分析理由": reason,
+                            "狀態": buy_status
                         })
                 except:
                     continue
@@ -257,17 +269,26 @@ if st.button("開始掃描 (精準上市清單)", type="primary"):
     progress_bar.empty()
     status_text.empty()
     
+    # 3. 顯示結果
     if results:
         st.success(f"掃描完成！共發現 {len(results)} 檔標的。")
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        res_df = pd.DataFrame(results)
+        
+        # 讓代號跟名稱排在前面
+        cols = ["代號", "名稱", "現價", "狀態", "分析理由"]
+        st.dataframe(res_df[cols], use_container_width=True)
     else:
-        st.warning("掃描完成，無符合條件標的。請放寬篩選條件。")
+        st.warning("掃描完成，無符合條件標的。建議放寬「勝率」或「成交量」門檻。")
 
 # 個股檢視
 st.markdown("---")
 st.subheader("🔍 個股詳細檢查")
-check_ticker = st.text_input("輸入代碼 (如 2330.TW)", "2337.TW")
+check_ticker = st.text_input("輸入代碼 (如 2330)", "2337")
 if check_ticker:
+    # 自動補 .TW
+    if ".TW" not in check_ticker.upper():
+        check_ticker = check_ticker + ".TW"
+        
     try:
         df_check = yf.download(check_ticker, period="6mo", progress=False)
         if isinstance(df_check.columns, pd.MultiIndex):
@@ -285,4 +306,4 @@ if check_ticker:
              
         st.plotly_chart(fig, use_container_width=True)
     except:
-        st.error("查無此股")
+        st.error("查無此股數據")
