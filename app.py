@@ -3,6 +3,11 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
+import urllib3
+
+# 關閉 SSL 警告 (因為我們要繞過證交所的憑證驗證)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
 # 1. 系統初始化
@@ -17,50 +22,58 @@ if 'portfolio' not in st.session_state:
     }
 
 # ============================================
-# 2. 核心功能：抓取證交所真實清單 (含中文名)
+# 2. 核心功能：抓取證交所真實清單 (修復 SSL 問題)
 # ============================================
 @st.cache_data(ttl=86400)
 def get_twse_stock_list():
     """
     從台灣證券交易所 (TWSE) 抓取真實上市公司清單
-    回傳: (tickers_list, names_dict)
+    使用 requests + verify=False 來解決 SSL 憑證錯誤
     """
     try:
         # 證交所「上市公司」網址 (Mode=2)
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         
-        # 讀取 HTML 表格 (encoding='cp950' 是為了解析繁體中文)
-        dfs = pd.read_html(url, encoding='cp950')
+        # 使用 requests 強制繞過 SSL 驗證
+        res = requests.get(url, verify=False)
+        
+        # 讀取 HTML 表格
+        dfs = pd.read_html(res.text) # 改由 requests 的回應內容讀取
         df = dfs[0]
         
-        # 整理欄位 (前兩列通常是雜訊，設第一列為 Header)
+        # 整理欄位 (設第一列為 Header)
         df.columns = df.iloc[0]
         df = df.iloc[1:]
         
         # 篩選：有價證券別必須是「股票」 (排除 ETF, 權證, 特別股)
-        df = df[df['有價證券別'] == '股票']
+        # 注意：不同 pandas 版本讀取出來的欄位名稱可能略有不同，這裡做個防呆
+        col_type = '有價證券別'
+        if col_type in df.columns:
+            df = df[df[col_type] == '股票']
         
         tickers = []
         names_map = {}
         
-        for index, row in df.iterrows():
-            code_name = row['有價證券代號及名稱']
-            # 格式通常是 "2330 台積電"
-            parts = code_name.split()
-            if len(parts) >= 2:
-                code = parts[0]
-                name = parts[1]
-                
-                # 確保是 4 碼數字 (防呆)
-                if len(code) == 4 and code.isdigit():
-                    ticker = f"{code}.TW"
-                    tickers.append(ticker)
-                    names_map[ticker] = name
+        col_code_name = '有價證券代號及名稱'
+        if col_code_name in df.columns:
+            for index, row in df.iterrows():
+                code_name = row[col_code_name]
+                # 格式通常是 "2330 台積電"
+                parts = str(code_name).split()
+                if len(parts) >= 2:
+                    code = parts[0]
+                    name = parts[1]
+                    
+                    # 確保是 4 碼數字 (排除 0050 這種 ETF 雖然前面已過濾，但多一層保險)
+                    if len(code) == 4 and code.isdigit():
+                        ticker = f"{code}.TW"
+                        tickers.append(ticker)
+                        names_map[ticker] = name
                     
         return tickers, names_map
         
     except Exception as e:
-        st.error(f"無法從證交所抓取清單，請確認網路連線。錯誤: {e}")
+        st.error(f"清單抓取失敗，錯誤代碼: {e}")
         return [], {}
 
 def calculate_indicators(df):
@@ -104,7 +117,7 @@ def analyze_stock(ticker, stock_name, df, mode, params):
 
     reason = ""
     # 確保顯示中文名稱
-    display_name = f"{stock_name}({ticker.replace('.TW', '')})"
+    display_name = f"{stock_name} ({ticker.replace('.TW', '')})"
 
     # --- A. 右側交易 (順勢) ---
     if mode == 'Right':
@@ -201,7 +214,7 @@ st.markdown("---")
 
 if st.button("開始掃描 (上市股票)", type="primary"):
     
-    with st.spinner("正在從證交所抓取最新股票清單..."):
+    with st.spinner("正在連線證交所抓取最新股票清單..."):
         # 1. 取得真實清單
         all_tickers, names_map = get_twse_stock_list()
         
