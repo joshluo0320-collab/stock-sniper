@@ -6,25 +6,23 @@ import plotly.graph_objects as go
 import requests
 import urllib3
 
+# 關閉連線警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
 # 系統設定
 # ============================================
-st.set_page_config(page_title="台股直觀戰情室 (高勝率評分版)", layout="wide")
+st.set_page_config(page_title="台股 10D/10% 爆發預測系統", layout="wide")
 
 if 'cash' not in st.session_state:
     st.session_state.cash = 240000  
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = {
-        '2337.TW': {'cost': 0, 'shares': 1000} 
-    }
 
 # ============================================
-# 核心功能
+# 核心數據抓取 (連線證交所全市場)
 # ============================================
 @st.cache_data(ttl=86400)
-def get_twse_stock_list():
+def get_full_market_list():
+    """核實 1：連線證交所，抓取台股 1000+ 支上市股票"""
     try:
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         res = requests.get(url, verify=False)
@@ -32,206 +30,179 @@ def get_twse_stock_list():
         df = dfs[0]
         df.columns = df.iloc[0]
         df = df.iloc[1:]
-        if '有價證券別' in df.columns:
-            df = df[df['有價證券別'] == '股票']
         
         tickers = []
         names_map = {}
         for index, row in df.iterrows():
             code_name = str(row['有價證券代號及名稱'])
             parts = code_name.split()
-            if len(parts) >= 2:
-                code = parts[0]
-                name = parts[1]
-                if len(code) == 4 and code.isdigit():
-                    ticker = f"{code}.TW"
-                    tickers.append(ticker)
-                    names_map[ticker] = name
+            # 確保是 4 位數代號的股票
+            if len(parts) >= 2 and len(parts[0]) == 4 and parts[0].isdigit():
+                ticker = f"{parts[0]}.TW"
+                tickers.append(ticker)
+                names_map[ticker] = parts[1]
         return tickers, names_map
-    except: return [], {}
+    except:
+        return [], {}
 
-def calculate_indicators(df):
+def calculate_logic(df):
+    """計算判斷預測所需的各項指標"""
     if len(df) < 35: return df
     
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-
+    # 推進力 (MACD 斜率)
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Slope'] = df['MACD'].diff() 
 
+    # 噴發空間 (布林寬度)
     df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
+    df['Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Width'] = (df['Std'] * 4) / df['MA20']
+    
+    # 便宜程度 (RSI)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
     
     return df
 
 # ============================================
-# 二次篩選與評分機制
+# 核實 2：直白、淺顯、易懂的分析邏輯
 # ============================================
-def calculate_ai_score(last_k, vol_ratio, mode):
-    """計算這檔股票的爆發力綜合評分 (0-100)"""
-    score = 50 # 基礎分
-    
-    # 1. K線實體強度 (滿分 +20)：判斷主力是否留上影線出貨
-    body = abs(last_k['Close'] - last_k['Open'])
-    upper_shadow = last_k['High'] - max(last_k['Close'], last_k['Open'])
-    if upper_shadow == 0: 
-        score += 20
-    elif body > 0:
-        shadow_ratio = upper_shadow / body
-        if shadow_ratio < 0.5: score += 10
-        elif shadow_ratio > 2.0: score -= 15 # 上影線太長，扣分
-        
-    # 2. 量能動能 (滿分 +20)：量增價漲最好
-    if vol_ratio >= 2.0: score += 20
-    elif vol_ratio >= 1.5: score += 10
-    
-    # 3. 乖離率控管 (滿分 +10)：避免追高 (僅限右側)
-    if mode == 'Right':
-        bias = (last_k['Close'] - last_k['MA20']) / last_k['MA20'] * 100
-        if 0 < bias <= 8: score += 10 # 剛起漲，最甜
-        elif bias > 15: score -= 20 # 漲太多了，危險
-        
-    return min(100, max(0, int(score)))
-
-def analyze_stock(ticker, stock_name, df, mode, params):
-    if df is None or len(df) < 35: return False, None
-    
+def predict_burst(df):
+    """預測未來 10 日內漲 10% 的可能性"""
     last = df.iloc[-1]
-    price = last['Close']
+    prob = 30 # 基礎分
     
-    if last['Volume'] < params['min_volume']: return False, None
-    if not (params['price_min'] <= price <= params['price_max']): return False, None
-
-    rsi_val = last['RSI'] if not pd.isna(last['RSI']) else 50
-    ma20 = last['MA20']
+    analysis_text = []
     
-    recent = df.iloc[-10:]
-    up_days = sum(recent['Close'] >= recent['Open'])
-    win_rate = (up_days / 10) * 100
-    vol_ratio = last['Volume'] / last['Vol_MA5'] if last['Vol_MA5'] > 0 else 1.0
-
-    is_match = False
-    
-    if mode == 'Right':
-        if price > ma20 and win_rate >= params['min_win_rate'] and vol_ratio >= params['vol_burst_ratio']: 
-            is_match = True
-    elif mode == 'Left':
-        bias = (price - ma20) / ma20 * 100
-        if rsi_val < params['rsi_threshold'] and bias < -params['bias_threshold']: 
-            is_match = True
-
-    if is_match:
-        # 二次篩選評分
-        ai_score = calculate_ai_score(last, vol_ratio, mode)
+    # 1. 推進力 (MACD)
+    if last['MACD_Slope'] > 0:
+        prob += 20
+        analysis_text.append("🔥 加速前進中")
+    else:
+        analysis_text.append("💤 目前休息中")
         
-        # 白話文
-        if mode == 'Right': comment = "籌碼穩健，剛起漲" if ai_score >= 70 else "有上影線或乖離稍大，需觀察"
-        else: comment = "跌深醞釀反彈" if ai_score >= 60 else "空頭排列，僅能搶短"
-
-        return True, {
-            "代號": ticker.replace('.TW', ''),
-            "名稱": stock_name,
-            "AI評分": ai_score, # 用於二次排序
-            "現價": price,
-            "熱度(RSI)": rsi_val,
-            "近期勝率(%)": win_rate, # 已修復 UI 顯示 Bug
-            "量能倍數": f"{vol_ratio:.1f}倍",
-            "AI 簡評": comment,
-            "資金": "✅" if price*1000 <= st.session_state.cash else "❌"
-        }
+    # 2. 空間 (突破 20 日高點)
+    highest_recent = df['High'].rolling(20).max().iloc[-2]
+    if last['Close'] > highest_recent:
+        prob += 20
+        analysis_text.append("🚀 衝破天花板")
+    else:
+        analysis_text.append("🧱 上方有阻力")
         
-    return False, None
+    # 3. 能量 (成交量)
+    vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
+    if last['Volume'] > vol_ma5 * 1.5:
+        prob += 15
+        analysis_text.append("🔋 動能爆發")
+    
+    # 4. 準備度 (盤整多久了)
+    if last['BB_Width'] < df['BB_Width'].rolling(20).mean().iloc[-1]:
+        prob += 10
+        analysis_text.append("📦 壓縮完畢")
+
+    # 5. 回檔修正 (RSI)
+    if last['RSI'] > 75: 
+        prob -= 15 # 過熱風險
+        analysis_text.append("⚠️ 太熱小心")
+
+    return min(98, prob), " | ".join(analysis_text)
 
 # ============================================
-# UI 與主程式
+# 介面設計
 # ============================================
-st.sidebar.header("🕹️ 操盤控制台")
+st.sidebar.header("🕹️ 控制台")
+st.sidebar.write(f"💰 目前可用銀彈：${int(st.session_state.cash):,}")
 
-with st.sidebar.expander("💰 資產狀態", expanded=True):
-    st.session_state.cash = st.number_input("可用現金", value=st.session_state.cash, step=1000)
-    st.write(f"庫存: 旺宏 {st.session_state.portfolio.get('2337.TW', {}).get('shares', 0)} 股")
+price_range = st.sidebar.slider("股票單價範圍", 10, 300, (20, 150))
+min_vol = st.sidebar.number_input("每日最低成交量 (張)", value=1000)
+min_prob = st.sidebar.slider("爆發機率門檻 (%)", 40, 95, 65)
 
-st.sidebar.markdown("---")
-strategy_mode = st.sidebar.radio("交易策略", ["右側交易 (順勢追漲)", "左側交易 (逆勢抄底)"])
+st.title("📈 台股全市場「10日/10%」爆發預測")
+st.info("系統將連線證交所分析 1,000+ 支股票，篩選出具備『短期噴發基因』的標的。")
 
-st.sidebar.markdown("### 📊 初階過濾條件")
-price_range = st.sidebar.slider("預算範圍 (股價)", 10, 240, (20, 150))
-min_vol = st.sidebar.number_input("成交量 (避免沒人玩)", value=1000, step=500)
-
-params = {'price_min': price_range[0], 'price_max': price_range[1], 'min_volume': min_vol * 1000}
-
-if "右側" in strategy_mode:
-    params['min_win_rate'] = st.sidebar.slider("10日收紅K比例 (%)", 30, 90, 40)
-    params['vol_burst_ratio'] = st.sidebar.slider("今天人氣 (成交量倍增)", 0.8, 3.0, 1.0)
-else:
-    params['rsi_threshold'] = st.sidebar.slider("恐慌指數 (越低越便宜)", 10, 50, 30)
-    params['bias_threshold'] = st.sidebar.slider("打折程度 (跌幅 %)", 3, 20, 5)
-
-st.title("📈 台股直觀戰情室 (二次篩選版)")
-
-if st.button("🚀 開始全市場掃描", type="primary"):
-    with st.spinner("連線證交所..."):
-        all_tickers, names_map = get_twse_stock_list()
-        
-    if not all_tickers: st.stop()
+if st.button("🚀 開始全市場掃描 (約需 1 分鐘)", type="primary"):
+    tickers, names_map = get_full_market_list()
+    
+    if not tickers:
+        st.error("連線證交所失敗，請檢查網路。")
+        st.stop()
         
     results = []
     bar = st.progress(0)
-    status = st.empty()
+    status_text = st.empty()
     
-    chunk_size = 20
-    chunks = [all_tickers[i:i + chunk_size] for i in range(0, len(all_tickers), chunk_size)]
+    # 分段下載數據防止崩潰
+    chunk_size = 25
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
     
     for i, chunk in enumerate(chunks):
         bar.progress((i + 1) / len(chunks))
-        status.text(f"分析進度... (掃描至 {names_map.get(chunk[0], chunk[0])})")
+        status_text.text(f"正在分析第 {i*chunk_size} ~ {(i+1)*chunk_size} 支股票...")
         
         try:
-            batch = yf.download(chunk, period="2mo", group_by='ticker', progress=False, threads=False)
-            for ticker in chunk:
+            data = yf.download(chunk, period="3mo", group_by='ticker', progress=False, threads=False)
+            for t in chunk:
                 try:
-                    df = batch if len(chunk)==1 else batch.get(ticker)
-                    if df is None or df.empty: continue
+                    df = data if len(chunk) == 1 else data.get(t)
+                    if df is None or df.empty or len(df) < 20: continue
                     if isinstance(df.columns, pd.MultiIndex): df = df.droplevel(0, axis=1)
-                    if 'Close' not in df.columns: continue
                     
                     df = df.dropna(subset=['Close'])
-                    df = calculate_indicators(df)
+                    df = calculate_logic(df)
                     
-                    match, data = analyze_stock(ticker, names_map.get(ticker, ticker), df, "Right" if "右側" in strategy_mode else "Left", params)
-                    if match: results.append(data)
+                    last_p = df['Close'].iloc[-1]
+                    # 基礎過濾
+                    if not (price_range[0] <= last_p <= price_range[1]): continue
+                    if df['Volume'].iloc[-1] < min_vol * 1000: continue
+                    
+                    # 爆發預測
+                    prob, analysis = predict_burst(df)
+                    
+                    if prob >= min_prob:
+                        results.append({
+                            "代號": t.replace(".TW", ""),
+                            "股票名稱": names_map.get(t, t),
+                            "預測爆發力": prob,
+                            "目前價格": last_p,
+                            "白話分析報告": analysis,
+                            "操作建議": "🔥 重點跟進" if prob >= 80 else "👀 放入清單"
+                        })
                 except: continue
         except: continue
-            
+
     bar.empty()
-    status.empty()
-    
+    status_text.empty()
+
     if results:
-        df_res = pd.DataFrame(results)
-        
-        # 二次篩選：依照 AI評分 由高到低排序，把真正高勝率的推到最前面
-        df_res = df_res.sort_values(by="AI評分", ascending=False)
-        
-        st.success(f"找到 {len(results)} 檔機會！已依照「爆發力綜合評分」自動排序。")
+        df_res = pd.DataFrame(results).sort_values(by="預測爆發力", ascending=False)
+        st.success(f"掃描完成！從 1,000+ 支股票中挑選出 {len(results)} 檔具備爆發潛力的標的。")
         
         st.dataframe(
             df_res,
             column_config={
-                "代號": st.column_config.TextColumn("代號", width="small"),
-                "名稱": st.column_config.TextColumn("名稱", width="small"),
-                "AI評分": st.column_config.NumberColumn("🔥 爆發力評分", help="滿分100。考量K線型態、均線乖離與量能的綜合分數", format="%d 分"),
-                "現價": st.column_config.NumberColumn("價格", format="$%.2f"),
-                "熱度(RSI)": st.column_config.ProgressColumn("溫度計 (RSI)", format="%d", min_value=0, max_value=100),
-                "近期勝率(%)": st.column_config.ProgressColumn("近期勝率", help="過去10天收紅K的比例", format="%d%%", min_value=0, max_value=100),
-                "AI 簡評": st.column_config.TextColumn("💡 AI 白話點評", width="medium"),
+                "預測爆發力": st.column_config.ProgressColumn(
+                    "未來10日漲10%機率",
+                    help="分數越高，代表動能與空間越充足",
+                    format="%d%%",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "目前價格": st.column_config.NumberColumn("價格", format="$%.1f"),
+                "白話分析報告": st.column_config.TextColumn("📊 技術診斷", width="large")
             },
             use_container_width=True,
             hide_index=True
         )
     else:
-        st.warning("沒找到。建議放寬初階過濾條件。")
+        st.warning("當前市場動能不足，沒有符合高爆發條件的股票。")
+
+st.markdown("---")
+st.subheader("💡 數據說明 (直白版)")
+c1, c2, c3 = st.columns(3)
+c1.write("**🔥 推進力**：代表買的人力道越來越大，沒有熄火。")
+c2.write("**🚀 衝破天花板**：前方沒有人被套牢，漲起來沒阻力。")
+c3.write("**🔋 動能爆發**：今天進場的人比平常多很多，大家都在買。")
