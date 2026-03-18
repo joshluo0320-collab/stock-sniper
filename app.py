@@ -8,29 +8,31 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 系統設定與 UI 控制台
+# 1. 系統設定
 # ============================================
-st.set_page_config(page_title="台股獵殺系統 - 10D 趨勢版", layout="wide")
+st.set_page_config(page_title="台股獵殺決賽系統 - 0319版", layout="wide")
 
 if 'cash' not in st.session_state:
     st.session_state.cash = 190000 
 
-st.sidebar.header("🕹️ 獵殺與庫存控制台")
+st.sidebar.header("🕹️ 獵殺控制台")
 st.session_state.cash = st.sidebar.number_input("當前可用銀彈 (NTD)", value=st.session_state.cash)
 
-# --- 關鍵修改：將 5D 門檻改為 10D 門檻 ---
-min_p10_threshold = st.sidebar.slider("📈 10日趨勢過濾門檻", 30, 95, 70) # 預設提高到 70% 找強勢趨勢
+# 💡 關鍵變數：10D 趨勢門檻
+min_p10_threshold = st.sidebar.slider("📈 10日趨勢過濾門檻", 30, 95, 45)
 trail_percent = st.sidebar.slider("🛡️ 動態止盈回落 (%)", 3.0, 15.0, 7.0, step=0.5)
 
 st.sidebar.markdown("---")
 st.sidebar.header("📋 我的庫存建倉")
+# 格式：代號,成本 (每行一組)
 inventory_input = st.sidebar.text_area("輸入庫存 (代號,成本)", value="2337,34\n1409,16.5")
 
 # ============================================
-# 2. 核心計算邏輯
+# 2. 核心技術模組
 # ============================================
 @st.cache_data(ttl=3600)
 def get_market_list():
+    """抓取全市場 1,000+ 支上市標的"""
     try:
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         res = requests.get(url, verify=False)
@@ -50,7 +52,7 @@ def get_market_list():
 def calculate_logic(df, tp_pct):
     if len(df) < 40: return df
     close = df['Close']
-    # 計算指標
+    # 指標計算
     exp12 = close.ewm(span=12, adjust=False).mean()
     exp26 = close.ewm(span=26, adjust=False).mean()
     df['MACD_S'] = (exp12 - exp26).diff() 
@@ -65,67 +67,66 @@ def calculate_logic(df, tp_pct):
 def predict_probabilities(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    # 10日機率：側重「結構」
+    # 10D 趨勢
     p10 = 40 + (20 if last['MACD_S'] > 0 else 0) + (15 if last['Vol_R'] > 1.2 else 0) + (20 if last['Close'] > last['High20'] else 0)
-    # 5日機率：側重「加速度」
+    # 5D 噴發
     p5 = 20 + (35 if last['MACD_S'] > prev['MACD_S'] * 1.3 else 0) + (30 if last['Vol_R'] > 2.5 else 0) + (10 if last['Close'] > last['Open'] * 1.04 else 0)
     return min(98, p5), min(98, p10)
 
 # ============================================
-# 3. 主程式介面
+# 3. 主介面執行
 # ============================================
-st.title("🚀 台股決賽輪：10D 趨勢模組監控系統")
+st.title("🚀 台股決賽輪：10D 趨勢＋全市場監控系統")
 
-# --- 第一部分：全市場 10D 獵殺掃描 ---
-if st.button("🚀 啟動全市場 1000+ 標的趨勢掃描", type="primary"):
+# --- 第一區：全市場獵殺 ---
+if st.button("🔴 啟動全市場 1000+ 標的掃描 (推薦開盤前執行)", type="primary"):
     tickers, names_map = get_market_list()
     all_results = []
     bar = st.progress(0)
     
-    chunks = [tickers[i:i + 35] for i in range(0, len(tickers), 35)]
+    # 使用 chunk 分批下載，threads=True 加速
+    chunks = [tickers[i:i + 50] for i in range(0, len(tickers), 50)]
     for i, chunk in enumerate(chunks):
         bar.progress((i + 1) / len(chunks))
-        data = yf.download(chunk, period="4mo", group_by='ticker', progress=False)
-        for t in chunk:
-            try:
+        try:
+            data = yf.download(chunk, period="4mo", group_by='ticker', progress=False, threads=True)
+            for t in chunk:
                 df = data if len(chunk)==1 else data.get(t)
-                if df is None or df.empty or len(df)<35: continue
+                if df is None or df.empty or len(df)<40: continue
                 if isinstance(df.columns, pd.MultiIndex): df = df.droplevel(0, axis=1)
                 
                 df = calculate_logic(df.dropna(), trail_percent)
                 p5, p10 = predict_probabilities(df)
                 last_p = df['Close'].iloc[-1]
                 
-                # 成交量過濾 (日均量 > 1200張)
-                if df['Volume'].iloc[-1] < 1200 * 1000: continue 
+                # 成交量過濾 (日均 1000 張以上)
+                if df['Volume'].iloc[-1] < 1000 * 1000: continue 
 
-                # --- 核心修改：判斷 10D 勝率門檻 ---
                 if p10 >= min_p10_threshold:
-                    entry_p = round(last_p * 1.005, 2)
                     all_results.append({
                         "代號": t.replace(".TW",""),
                         "名稱": names_map[t],
                         "10D趨勢分": f"{p10}%", 
                         "5D噴發分": f"{p5}%",
                         "現價": round(last_p, 2),
-                        "建議進場價": entry_p,
+                        "建議進場價": round(last_p * 1.005, 2),
                         "動態止盈線": round(df['Trailing_Stop_Line'].iloc[-1], 2),
-                        "動能狀況": "🔥 極強" if p5 > 65 else "📈 穩健"
+                        "狀態": "🔥 極強" if p5 > 65 else "📈 穩健"
                     })
-            except: continue
+        except: continue
     
     bar.empty()
     if all_results:
-        st.subheader(f"🏆 符合 {min_p10_threshold}% 10日趨勢門檻之名單")
-        # 顯示時將 10D 趨勢分放在最醒目的位置
-        st.dataframe(pd.DataFrame(all_results).sort_values(by="10D趨勢分", ascending=False), hide_index=True, use_container_width=True)
+        res_df = pd.DataFrame(all_results).sort_values(by="10D趨勢分", ascending=False)
+        st.subheader(f"🏆 符合 {min_p10_threshold}% 10D 趨勢門檻之強勢股")
+        st.dataframe(res_df, hide_index=True, use_container_width=True)
     else:
-        st.warning(f"目前市場無標的符合 {min_p10_threshold}% 的 10 日趨勢門檻。")
+        st.warning(f"目前市場無符合 {min_p10_threshold}% 門檻標的。建議將左側 10D 門檻調低至 40% 後重試。")
 
 st.markdown("---")
 
-# --- 第二部分：庫存回測報告 (維持不變) ---
-st.subheader("💰 庫存盈利與撤退監控")
+# --- 第二區：庫存回測 ---
+st.subheader("💰 我的庫存盈利與動態止盈回測")
 if st.button("📊 執行庫存盈虧報告"):
     inv_results = []
     for item in inventory_input.split('\n'):
@@ -138,20 +139,24 @@ if st.button("📊 執行庫存盈虧報告"):
                     if isinstance(df_inv.columns, pd.MultiIndex): df_inv = df_inv.droplevel(1, axis=1)
                     df_inv = calculate_logic(df_inv, trail_percent)
                     last_p = df_inv['Close'].iloc[-1]
+                    stop_line = df_inv['Trailing_Stop_Line'].iloc[-1]
                     inv_results.append({
-                        "代號": tid, "成本": float(cost), "現價": round(last_p, 2),
+                        "名稱/代號": tid, 
+                        "建倉成本": float(cost), 
+                        "目前現價": round(last_p, 2),
                         "累積盈利": f"{round((last_p/float(cost)-1)*100, 2)}%",
-                        "動態止盈線": round(df_inv['Trailing_Stop_Line'].iloc[-1], 2),
-                        "狀態": "⚠️ 建議撤退" if last_p < df_inv['Trailing_Stop_Line'].iloc[-1] else "✅ 安全持有"
+                        "止盈生死線": round(stop_line, 2),
+                        "系統指令": "⚠️ 建議撤退" if last_p < stop_line else "✅ 獲利奔跑中"
                     })
             except: continue
-    if inv_results: st.table(pd.DataFrame(inv_results))
+    if inv_results:
+        st.table(pd.DataFrame(inv_results))
 
 # ============================================
 # 4. 人生合夥人點醒
 # ============================================
 st.write("---")
 st.write("### 💡 人生合夥人的真實點醒")
-st.write(f"1. **為何改用 10D 勝率？** 10D 衡量的是『結構強度』。如果 10D > 70%，通常代表該股已經站上所有短中期均線，並開啟波段漲勢。")
-st.write(f"2. **5D 分數的輔助意義**：即便 10D 高，但如果 5D 分數很低（例如 < 30%），代表趨勢雖好但『今日沒力』。**真正的獵物是 10D 高且 5D 也高的那幾支。**")
-st.write(f"3. **旺宏 34 元的地位**：這種標的的 10D 勝率通常會極高。你的 19 萬現金現在應該去找那些 10D > 75% 且 5D 剛轉強的標的（例如光環或新纖）。")
+st.write(f"1. **為何剛才沒標的？** 全台灣 1,000 支股票在回檔期，可能只有 1% 具備強勢趨勢。請記住，**「沒標的」本身就是一種市場警告**，代表現在不適合積極進場。")
+st.write(f"2. **10D 與 5D 的雙重過濾**：如果你看到一支標的 10D 是 80%，但 5D 只有 20%，代表它是強勢股在「休息」，是左側交易者的機會。")
+st.write(f"3. **旺宏 34 元的紀律**：即便帳面賺很多，但「止盈生死線」是為了防止你從「賺 300%」變成「賺 200%」。**利潤是拿進口袋的才算數。**")
