@@ -8,11 +8,11 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 自動連網：今日時事熱點分析
+# 1. 自動連網：今日時事與國際情勢權重
 # ============================================
-@st.cache_data(ttl=600)
-def get_live_sentiment():
-    """自動偵測國際情勢與時事權重"""
+@st.cache_data(ttl=3600)
+def get_market_news_weights():
+    """自動偵測國際熱點：AI算力、美伊衝突、半導體循環"""
     weights = {"2337": 15, "3017": 15, "3234": 15, "4919": 10, "1409": 10}
     try:
         res = requests.get("https://money.udn.com/money/index", timeout=5, verify=False)
@@ -21,112 +21,108 @@ def get_live_sentiment():
         if "記憶體" in text or "HBM" in text: weights["2337"] += 10
         if "散熱" in text or "液冷" in text: weights["3017"] += 10
         if "邊緣運算" in text or "MCU" in text: weights["4919"] += 10
-        if "避險" in text or "衝突" in text: weights["1409"] += 15
+        if "衝突" in text or "避險" in text: weights["1409"] += 15
     except: pass
     return weights
 
 # ============================================
-# 2. 側邊控制台：直白控制項
-# ============================================
-st.sidebar.header("🕹️ 獵殺控制台")
-min_gate = st.sidebar.slider("🎯 綜合勝率門檻 (%)", 10, 95, 50)
-st.sidebar.info("勝率由：趨勢(40%)、能量(20%)、時事(20%) 組成")
-
-st.sidebar.markdown("---")
-st.sidebar.header("🌊 流動性門檻")
-vol_gate = st.sidebar.slider("📊 5日均張 (過濾冷門股)", 0, 5000, 500)
-
-st.sidebar.markdown("---")
-st.sidebar.header("📋 我的庫存設定")
-inventory_input = st.sidebar.text_area("代號,成本", value="2337,34\n1409,16.5")
-
-# ============================================
-# 3. 核心邏輯：中文名稱對應與計算
+# 2. 核心邏輯：將專業指標轉化為「白話分析」
 # ============================================
 STOCK_NAMES = {"2337": "旺宏", "3017": "奇鋐", "3234": "光環", "1409": "新纖", "4919": "新唐", "2330": "台積電"}
 
-def sniper_analysis(df, tid, news_w, min_v):
-    if df.empty or len(df) < 20: return None
+def get_plain_analysis(df, tid, news_w, min_v):
+    if df.empty or len(df) < 25: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     
-    # [能量與流動性分析]
+    # [能量數據：油箱滿不滿]
     avg_v = df['Volume'].tail(5).mean() / 1000
     if avg_v < min_v: return None
     v_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v
+    vol_text = "⛽ 油箱爆滿 (主力進場)" if v_ratio > 1.5 else "🚗 油量正常 (平穩)"
 
-    # [趨勢分析]
+    # [趨勢數據：油門踩多深]
     close = df['Close']
-    df['MACD_S'] = (close.ewm(span=12).mean() - close.ewm(span=26).mean()).diff()
-    df['High20'] = df['High'].rolling(20).max().shift(1)
-    is_break = close.iloc[-1] > df['High20'].iloc[-1]
+    dif = (close.ewm(span=12).mean() - close.ewm(span=26).mean()).diff().iloc[-1]
+    trend_text = "🏎️ 全油門衝刺" if dif > 0 else "🐢 慢速爬行"
+
+    # [突破點數據：前面有牆嗎]
+    high_20 = df['High'].rolling(20).max().shift(1).iloc[-1]
+    is_break = close.iloc[-1] > high_20
+    wall_text = "🛣️ 前方無障礙 (已超車)" if is_break else "🚧 前方有牆 (盤整中)"
     
-    # [勝率加權]
-    score = 40
-    score += 20 if df['MACD_S'].iloc[-1] > 0 else -10
-    score += 20 if is_break else 0
-    score += 10 if v_ratio > 1.3 else 0
-    score += news_w.get(tid, 0)
+    # [勝率與建議進場價]
+    score = 40 + (25 if dif > 0 else -10) + (20 if is_break else 0) + (10 if v_ratio > 1.2 else 0) + news_w.get(tid, 0)
+    last_p = round(float(close.iloc[-1]), 2)
+    entry_low = round(last_p * 0.98, 2)  # 回測2%
+    entry_high = round(last_p * 0.995, 2) # 回測0.5%
     
     return {
-        "name": STOCK_NAMES.get(tid, tid),
-        "score": min(98, score),
-        "v_ratio": round(v_ratio, 2),
-        "avg_v": int(avg_v),
-        "price": round(float(close.iloc[-1]), 2),
-        "stop": round(float(df['High'].cummax().iloc[-1] * 0.93), 2)
+        "股票名稱": STOCK_NAMES.get(tid, tid),
+        "綜合勝率": f"{min(98, score)}%",
+        "氣勢分析": trend_text,
+        "路況分析": wall_text,
+        "能量分析": vol_text,
+        "今日收盤": last_p,
+        "隔日建議進場區": f"{entry_low} ~ {entry_high}",
+        "撤退防守線": round(float(df['High'].cummax().iloc[-1] * (1 - trail_pct/100)), 2)
     }
 
 # ============================================
-# 4. 顯示：去蕪存菁最強前五
+# 3. UI 介面佈局
 # ============================================
-st.title("🏹 台股全景獵殺系統 - 中文直白版")
+st.sidebar.header("🕹️ 戰略控制台")
+min_score = st.sidebar.slider("🎯 最低勝率門檻", 10, 95, 50)
+trail_pct = st.sidebar.slider("🛡️ 動態止盈回落 (%)", 3.0, 15.0, 7.0)
+vol_gate = st.sidebar.slider("🌊 5日均張門檻", 0, 5000, 500)
 
-news_w = get_live_sentiment()
+inventory_input = st.sidebar.text_area("📋 庫存: 代號,成本", value="2337,34\n1409,16.5")
 
-# --- 庫存監控 ---
-st.subheader("💰 我的持倉動態檢視")
-if st.button("🔄 更新持倉走勢"):
+st.title("🏹 2026 全景獵殺系統 - 盤後佈局版")
+
+news_w = get_market_news_weights()
+
+# --- 庫存狀態 ---
+st.subheader("💰 庫藏動態與撤退點醒")
+if st.button("🔄 刷新庫藏走勢"):
     inv_list = [l.split(',') for l in inventory_input.split('\n') if ',' in l]
-    inv_res = []
+    inv_data = []
     for tid, cost in inv_list:
         tid = tid.strip()
         df = yf.download(f"{tid}.TW", period="1y", progress=False)
         if df.empty: df = yf.download(f"{tid}.TWO", period="1y", progress=False)
-        res = sniper_analysis(df, tid, news_w, 0)
+        res = get_plain_analysis(df, tid, news_w, 0)
         if res:
-            p_l = (res['price'] / float(cost) - 1) * 100
-            inv_res.append({
-                "股票名稱": res['name'], "成本": cost, "現價": res['price'],
-                "即時盈虧": f"{round(p_l, 2)}%", "止盈線": res['stop'], "建議": "✅ 續留" if res['price'] > res['stop'] else "⚠️ 撤退"
+            p_l = (res['今日收盤'] / float(cost) - 1) * 100
+            inv_data.append({
+                "股票名稱": res['股票名稱'], "即時盈虧": f"{round(p_l, 2)}%",
+                "現價": res['今日收盤'], "防守價": res['撤退防守線'],
+                "白話點醒": "✅ 趨勢極強，安心續抱" if res['今日收盤'] > res['撤退防守線'] else "⚠️ 警報響起，準備離場"
             })
-    st.table(inv_res)
+    st.table(inv_data)
 
 st.markdown("---")
 
-# --- 最強前五 ---
-st.subheader("🏆 全市場最強前五標的")
-if st.button("🔴 開始全新搜尋", type="primary"):
-    st.write(f"🌍 今日連網時事加權：{news_w}")
-    pool = ["2337.TW", "3017.TW", "3234.TWO", "1409.TW", "4919.TW", "2330.TW"]
+# --- 盤後最強前五與進場價 ---
+st.subheader("🏆 隔日獵殺：最強前五標的與進場價")
+if st.button("🔴 啟動全方位時事掃描", type="primary"):
+    pool = ["2337.TW", "3017.TW", "3234.TWO", "1409.TW", "4919.TW", "2383.TW", "2330.TW"]
     scan_res = []
     for t in pool:
         df = yf.download(t, period="6mo", progress=False)
         tid = t.split(".")[0]
-        res = sniper_analysis(df, tid, news_w, vol_gate)
-        if res and res['score'] >= min_gate:
+        res = get_plain_analysis(df, tid, news_w, vol_gate)
+        if res and int(res['綜合勝率'].replace('%','')) >= min_score:
             scan_res.append(res)
     
     if scan_res:
-        df_top5 = pd.DataFrame(scan_res).sort_values(by="score", ascending=False).head(5)
-        # 轉換表格欄位名稱
-        df_show = df_top5.rename(columns={
-            "name": "股票名稱", "score": "綜合勝率(%)", "v_ratio": "能量異動(倍)",
-            "avg_v": "5日均張", "price": "今日現價", "stop": "防守線"
-        })
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        df_top5 = pd.DataFrame(scan_res).sort_values(by="綜合勝率", ascending=False).head(5)
+        st.dataframe(df_top5, use_container_width=True, hide_index=True)
 
-        # --- 人生合夥人深度點醒 ---
+        # --- 人生合夥人的直白建議區 ---
         st.markdown("---")
-        st.header("🧠 人生合夥人的直白點醒")
-        top_name = df_show.iloc[0]['股票名稱']
-        st.info(f"**【獵殺標的：{top_name}】** 目前勝率最高！它不僅具備趨勢突破，連網時事更顯示其族群正受到資金熱捧。如果你的 19 萬現金在找家，這就是首選。")
+        st.header("🧠 人生合夥人的直白戰術建議")
+        top_pick = df_top5.iloc[0]
+        st.info(f"**【戰術首選：{top_pick['股票名稱']}】**\n\n" + 
+                f"這支股票目前 **{top_pick['氣勢分析']}**，且 **{top_pick['路況分析']}**。\n" +
+                f"明天建議在 **{top_pick['隔日建議進場區']}** 之間埋伏。如果開盤直接衝太高，寧可不買，也不要追高！\n\n" +
+                f"**時事提醒：** 目前國際焦點在 AI 算力與地緣政治，這支股票剛好站在風口上，贏面極大。")
