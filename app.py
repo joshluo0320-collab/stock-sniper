@@ -9,131 +9,162 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 戰略核心：自動抓取核心標的名單 (含中文名稱與時事權重)
+# 1. 戰略核心：自動抓取全市場 1,800+ 支標的
 # ============================================
-@st.cache_data(ttl=86400)
-def get_strategic_stock_list():
-    """抓取核心避險與攻擊標的名單 (備援機制)"""
-    tickers = ["2337.TW", "1409.TW", "3017.TW", "3234.TWO", "4919.TW", "2330.TW", "2317.TW"]
-    names_map = {"2337": "旺宏", "1409": "新纖", "3017": "奇鋐", "3234": "光環", "4919": "新唐", "2330": "台積電", "2317": "鴻海"}
+@st.cache_data(ttl=86400) # 每天更新一次名單
+def get_total_market_list():
+    """從證交所抓取上市與上櫃完整名單"""
+    tickers, names_map = [], {}
+    urls = [
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", # 上市
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"  # 上櫃
+    ]
+    for url in urls:
+        try:
+            res = requests.get(url, verify=False, timeout=20)
+            res.encoding = 'big5'
+            soup = BeautifulSoup(res.text, 'lxml')
+            for row in soup.find_all('tr'):
+                tds = row.find_all('td')
+                if len(tds) > 0:
+                    raw = tds[0].text.strip().split()
+                    if len(raw) >= 2 and len(raw[0]) == 4 and raw[0].isdigit():
+                        suffix = ".TW" if "strMode=2" in url else ".TWO"
+                        sym = f"{raw[0]}{suffix}"
+                        tickers.append(sym)
+                        names_map[raw[0]] = raw[1]
+        except: continue
     return tickers, names_map
 
+# ============================================
+# 2. 自動連網：時事與國際情勢權重更新
+# ============================================
 @st.cache_data(ttl=3600)
-def get_live_news_sentiment():
-    """自動偵測國際熱點 (範例權重)"""
-    weights = {"2337": 15, "3017": 15, "3234": 15, "4919": 10}
-    # (此處可加入新聞爬蟲代碼)
+def get_realtime_news_weights():
+    """自動偵測今日熱點關鍵字加權"""
+    weights = {} 
+    try:
+        res = requests.get("https://money.udn.com/money/index", timeout=5, verify=False)
+        res.encoding = 'utf-8'
+        text = res.text
+        # 自動識別時事關鍵字並對特定代號加權
+        if "記憶體" in text: weights.update({"2337": 15, "2408": 10})
+        if "散熱" in text: weights.update({"3017": 15, "3324": 15})
+        if "衝突" in text: weights.update({"1409": 15, "2104": 10})
+    except: pass
     return weights
 
 # ============================================
-# 2. 核心邏輯：將指標轉化為「白話實戰分析」
+# 3. 核心分析：將專業數據轉化為白話建議
 # ============================================
-def calculate_plain_english_logic(df, tid, name, news_w, vol_gate, trail_p):
-    if df.empty or len(df) < 20: return None
+def execute_sniper_analysis(df, tid, name, news_w, vol_gate, trail_p):
+    if df.empty or len(df) < 25: return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = df.dropna()
-    
-    # [能量與流動性分析]
-    avg_v = df['Volume'].tail(5).mean() / 1000
-    if avg_v < vol_gate: return None # 流動性過濾
-    
-    vol_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v
 
-    # [趨勢分析]
+    # [能量數據]
+    avg_v = df['Volume'].tail(5).mean() / 1000
+    if avg_v < vol_gate: return None
+    v_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v
+
+    # [趨勢數據]
     close = df['Close']
     dif = (close.ewm(span=12).mean() - close.ewm(span=26).mean()).diff().iloc[-1]
+    
+    # [路況數據]
     high_20 = df['High'].rolling(20).max().shift(1).iloc[-1]
     is_break = close.iloc[-1] > high_20
     
     # [綜合勝率計算]
-    score = 40 + (25 if dif > 0 else -10) + (20 if is_break else 0) + (10 if vol_ratio > 1.2 else 0) + news_w.get(tid, 0)
+    score = 40 + (25 if dif > 0 else -10) + (20 if is_break else 0) + (10 if v_ratio > 1.2 else 0) + news_w.get(tid, 0)
     
     last_p = round(float(close.iloc[-1]), 2)
     return {
-        "股票名稱": name, "代號": tid, "綜合勝率": f"{min(98, score)}%",
+        "股票名稱": name, "代號": tid, "綜合勝率": f"{min(98, int(score))}%",
         "氣勢分析": "🏎️ 全油門衝刺" if dif > 0 else "🐢 慢速爬行",
         "路況分析": "🛣️ 前方無障礙" if is_break else "🚧 前方有牆",
-        "能量分析": "⛽ 油箱爆滿" if vol_ratio > 1.5 else "🚗 油量正常",
+        "能量分析": "⛽ 油箱爆滿" if v_ratio > 1.5 else "🚗 油量正常",
         "今日收盤": last_p,
-        "隔日建議進場區": f"{round(last_p * 0.98, 2)} ~ {round(last_p * 0.995, 2)}",
+        "明日建議進場區": f"{round(last_p * 0.98, 2)} ~ {round(last_p * 0.995, 2)}",
         "防守撤退線": round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 2)
     }
 
 # ============================================
-# 3. UI 佈局：控制台、庫存、掃描
+# 4. 介面佈局與全市場執行
 # ============================================
-st.sidebar.header("🕹️ 獵殺控制台")
-min_gate = st.sidebar.slider("🎯 綜合勝率門檻 (%)", 10, 95, 50)
-st.sidebar.info(f"💡 目前門檻設為 {min_gate}%，低於此分數的股票將被隱藏。")
-
-trail_pct = st.sidebar.slider("🛡️ 動態止盈回落 (%)", 3.0, 15.0, 7.0)
+st.sidebar.header("🕹️ 戰略控制台")
+min_gate = st.sidebar.slider("🎯 綜合勝率門檻 (%)", 10, 95, 65)
 vol_limit = st.sidebar.slider("🌊 5日均張門檻", 0, 5000, 500)
+trail_pct = st.sidebar.slider("🛡️ 動態止盈回落 (%)", 3.0, 15.0, 7.0)
 
-inventory_input = st.sidebar.text_area("📋 庫存: 代號,成本", value="2337,34\n1409,16.5")
+st.sidebar.markdown("---")
+inventory_input = st.sidebar.text_area("📋 庫存監控: 代號,成本", value="2337,34\n1409,16.5")
 
-st.title("🏹 2026 全景獵殺系統 - 自動化全景版")
+st.title("🏹 2026 全景獵殺系統 - 1,800+ 全台股版")
 
-news_w = get_live_news_sentiment()
+news_w = get_realtime_news_weights()
 
-# --- 庫存狀態監控 ---
-st.subheader("📊 庫藏動態與撤退點醒")
-if st.button("🔄 刷新庫存與止盈線"):
-    # (省略部分與 image_10.png 無關的庫存更新邏輯，保持代碼簡潔)
-    st.success("庫存狀態已刷新。")
+# --- A. 庫存監控區 ---
+if st.button("🔄 刷新庫存狀態與防守線"):
+    inv_list = [l.split(',') for l in inventory_input.split('\n') if ',' in l]
+    inv_res = []
+    for tid, cost in inv_list:
+        tid = tid.strip()
+        df = yf.download(f"{tid}.TW", period="1y", progress=False)
+        if df.empty: df = yf.download(f"{tid}.TWO", period="1y", progress=False)
+        res = execute_sniper_analysis(df, tid, tid, news_w, 0, trail_pct)
+        if res:
+            p_l = (res['今日收盤'] / float(cost) - 1) * 100
+            inv_res.append({
+                "代號": tid, "現價": res['今日收盤'], "盈虧": f"{round(p_l, 2)}%",
+                "防守價": res['防守撤退線'], "建議": "✅ 續留" if res['今日收盤'] > res['防守撤退線'] else "⚠️ 斷捨離"
+            })
+    st.table(inv_res)
 
-st.markdown("---")
-
-# --- 自動展開：全台股獵殺結果 ---
-st.subheader("🏆 全台股獵殺：去蕪存菁最強前 10 名")
-
-# 模擬搜尋狀態 ( image_10.png 中的效果)
-status_placeholder = st.empty()
-progress_bar = st.progress(0)
-
-with status_placeholder.container():
-    st.markdown("🎯 **雷達搜尋中...**")
-    tickers, names_map = get_strategic_stock_list()
-    st.write(f"🌐 正在連線至核心名單...")
-    time.sleep(0.5)
-    st.write(f"已成功鎖定 {len(tickers)} 支標的名單。")
-    st.write("🔦 正在分析市場資金流向與時事加權...")
-    time.sleep(0.5)
-
-# 執行掃描並自動展開
-if tickers:
-    scan_results = []
-    chunk_size = 3
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        progress_bar.progress(min((i + chunk_size) / len(tickers), 1.0))
+# --- B. 全市場獵殺區 ---
+if st.button("🔴 啟動全台股 1,800 支標的獵殺 (Top 10)", type="primary"):
+    all_tickers, names_map = get_total_market_list()
+    st.write(f"🔍 已成功加載 **{len(all_tickers)}** 支全市場標的，開始深度掃描...")
+    
+    final_results = []
+    pb = st.progress(0)
+    status_text = st.empty()
+    
+    # 批次處理 (每 40 支一組) 以提高效率並防止超時
+    chunk_size = 40
+    for i in range(0, len(all_tickers), chunk_size):
+        pb.progress(min((i + chunk_size) / len(all_tickers), 1.0))
+        chunk = all_tickers[i : i + chunk_size]
+        status_text.text(f"📡 目前偵測區段: {chunk[0][:4]} ...")
+        
         try:
-            data = yf.download(chunk, period="6mo", group_by='ticker', progress=False, timeout=20)
+            data = yf.download(chunk, period="6mo", group_by='ticker', progress=False, timeout=25)
             for t in chunk:
                 tid = t.split(".")[0]
                 df = data[t] if len(chunk) > 1 else data
-                res = calculate_plain_english_logic(df, tid, names_map.get(tid, tid), news_w, vol_limit, trail_pct)
-                # 關鍵修正：檢查是否符合用戶設定的勝率門檻
+                res = execute_sniper_analysis(df, tid, names_map.get(tid, tid), news_w, vol_limit, trail_pct)
                 if res and int(res['綜合勝率'].replace('%','')) >= min_gate:
-                    scan_results.append(res)
+                    final_results.append(res)
         except: continue
-    
-    progress_bar.empty()
-    status_placeholder.empty()
-    st.success("🎯 獵殺掃描完成！")
+        time.sleep(0.05) # 微秒延遲防止連線過載
 
-    if scan_results:
-        df_final = pd.DataFrame(scan_results).sort_values(by="綜合勝率", ascending=False).head(10)
-        # 修正：直接使用 st.dataframe 全自動展開結果
+    status_text.empty()
+    pb.empty()
+    st.success(f"🎯 掃描完成！在 {len(all_tickers)} 支中篩選出 {len(final_results)} 支符合門檻標的。")
+
+    if final_results:
+        df_final = pd.DataFrame(final_results).sort_values(by="綜合勝率", ascending=False).head(10)
+        st.subheader("🏆 每日前 10 名最強獵物清單")
         st.dataframe(df_final, use_container_width=True, hide_index=True)
         
-        # --- 新增：人生合夥人的深度解析區 ---
+        # --- 人生合夥人深度解析 ---
         st.markdown("---")
-        st.header("🧠 人生合夥人的直白戰術建議")
-        top_name = df_final.iloc[0]['股票名稱']
-        st.info(f"**【戰術首選：{top_name}】**\n\n"
-                f"這支股票目前處於 **{df_final.iloc[0]['氣勢分析']}**，代表油門已踩到底；\n"
-                f"且 **{df_final.iloc[0]['路況分析']}**，上方沒有壓力。\n\n"
-                f"**時事提醒：** 目前國際焦點在 AI 算力，相關概念股熱度極高，建議明日於 **{df_final.iloc[0]['隔日建議進場區']}** 區間伏擊。")
+        st.header("🧠 人生合夥人的盤後點醒")
+        best = df_final.iloc[0]
+        st.info(f"**【戰略首選：{best['股票名稱']}】**\n\n"
+                f"目前氣勢：{best['氣勢分析']} / 路況：{best['路況分析']}\n"
+                f"能量顯示：{best['能量分析']}\n\n"
+                f"**隔日佈局：** 建議進場區間為 **{best['明日建議進場區']}**。這支標的是目前全市場「勝率模型」跑出來的頂尖個案。")
     else:
-        st.warning(f"⚠️ 在目前的條件下（勝率門檻: {min_gate}%，均張門檻: {vol_limit}），未發現符合條件的獵物。請試著在側邊欄調整控制台參數。")
+        st.warning("⚠️ 掃描完畢，未發現符合高門檻之標的。請適度調低「勝率」或「均張」門檻再試。")
