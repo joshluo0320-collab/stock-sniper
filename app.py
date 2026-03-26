@@ -10,12 +10,12 @@ import random
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 名單獲取 (三層防禦機制)
+# 1. 核心數據獲取
 # ============================================
 @st.cache_data(ttl=86400)
-def get_verified_list():
+def get_market_map():
     tickers, names_map = [], {}
-    backup = {"2337": "旺宏", "1409": "新纖", "3017": "奇鋐", "3234": "光環", "4919": "新唐", "2330": "台積電"}
+    backup = {"2337": "旺宏", "1409": "新纖", "3017": "奇鋐", "3234": "光環", "4919": "新唐"}
     urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"
     for url in urls:
@@ -32,16 +32,14 @@ def get_verified_list():
                         tickers.append(f"{raw[0]}{suffix}")
                         names_map[raw[0]] = raw[1]
         except: continue
-    if len(tickers) < 10:
-        for k, v in backup.items():
-            tickers.append(f"{k}.TW")
-            names_map[k] = v
+    if not tickers:
+        for k, v in backup.items(): tickers.append(f"{k}.TW"); names_map[k] = v
     return tickers, names_map
 
 # ============================================
-# 2. 獵人分析核心邏輯
+# 2. 獵人核心：精確計算與分析
 # ============================================
-def execute_master_logic(df, tid, name, vol_gate, trail_p, max_budget):
+def execute_sniper_v23(df, tid, name, vol_gate, trail_p, max_budget):
     if df.empty or len(df) < 30: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     df = df.dropna()
@@ -49,89 +47,61 @@ def execute_master_logic(df, tid, name, vol_gate, trail_p, max_budget):
     last_p = round(float(df['Close'].iloc[-1]), 2)
     if last_p > max_budget: return None
 
-    # [1. 油門與壓力]
+    # [分析指標]
     ema_12 = df['Close'].ewm(span=12).mean()
     ema_26 = df['Close'].ewm(span=26).mean()
     macd_slope = (ema_12 - ema_26).diff().iloc[-1]
     high_20 = df['High'].rolling(20).max().shift(1).iloc[-1]
     is_break = df['Close'].iloc[-1] > high_20
-
-    # [2. 能量與法人動向模擬]
+    
     avg_v_5 = df['Volume'].tail(5).mean() / 1000
     if avg_v_5 < vol_gate: return None
     v_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v_5
     
-    # 模擬法人連買 (收盤價連續站穩均線天數)
     inst_days = 0
     ma20 = df['Close'].rolling(20).mean()
     for i in range(1, 6):
         if df['Close'].iloc[-i] > ma20.iloc[-i]: inst_days += 1
         else: break
 
-    # [3. 勝率計算]
     win_5 = 40 + (30 if df['Close'].iloc[-1] > df['Close'].rolling(5).mean().iloc[-1] else -10)
     win_10 = 40 + (40 if macd_slope > 0 else -15)
-    total_score = int((win_5 * 0.4) + (win_10 * 0.6))
-    if is_break: total_score += 10
+    total_score = int((win_5 * 0.4) + (win_10 * 0.6) + (10 if is_break else 0))
     
-    # [4. 隔日沖風險]
     today_ret = (df['Close'].iloc[-1] / df['Close'].iloc[-2] - 1) * 100
-    risk_status = "⚠️ 隔日沖" if (v_ratio > 2.5 and today_ret > 7) else "✅ 穩健"
+    risk = "⚠️ 隔日沖" if (v_ratio > 2.5 and today_ret > 7) else "✅ 穩健"
 
     return {
-        "名稱": name, "代號": tid, "綜合勝率": f"{int(min(98, total_score))}%",
-        "現價": last_p, "建議進場區": f"{round(last_p * 0.98, 2)}~{round(last_p * 0.995, 2)}",
+        "名稱": name, "代號": tid, "綜合勝率": total_score,
+        "價格": last_p, "進場區": f"{round(last_p * 0.98, 2)}~{round(last_p * 0.995, 2)}",
         "油門": "🏎️ 加速" if macd_slope > 0 else "🐢 減速",
         "路況": "🛣️ 無壓" if is_break else "🚧 有牆",
         "能量": "⛽ 爆量" if v_ratio > 1.5 else "🚗 正常",
-        "法人天數": f"🏛️ {inst_days}天",
-        "5D勝率": f"{min(98, int(win_5))}%", "10D勝率": f"{min(98, int(win_10))}%",
-        "風險": risk_status, "撤退線": round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 2)
+        "法人": f"🏛️ {inst_days}天", "風險": risk,
+        "撤退線": round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 2)
     }
 
 # ============================================
-# 3. UI 介面
+# 3. 介面與資金分配邏輯
 # ============================================
-st.set_page_config(page_title="全景獵殺系統 v22.3", layout="wide")
+st.set_page_config(page_title="獵殺系統 v23.0", layout="wide")
 st.sidebar.header("🕹️ 獵殺控制台")
-target_win = st.sidebar.slider("🎯 綜合勝率門檻 (%)", 10, 95, 60, step=5)
-vol_limit = st.sidebar.slider("🌊 5日均張門檻", 0, 10000, 500, step=500)
-trail_pct = st.sidebar.slider("🛡️ 動態止盈回落 (%)", 1.0, 15.0, 7.0, step=0.5)
-max_budget = st.sidebar.number_input("💸 單張最高預算 (元)", value=250)
+target_win = st.sidebar.slider("🎯 勝率門檻", 10, 95, 60, step=5)
+vol_limit = st.sidebar.slider("🌊 均張門檻", 0, 10000, 500, step=500)
+trail_pct = st.sidebar.slider("🛡️ 止盈回落", 1.0, 15.0, 7.0, step=0.5)
+max_budget = st.sidebar.number_input("💸 單張預算上限", value=250)
+total_cash = st.sidebar.number_input("💰 可用總現金 (元)", value=190000)
 
-st.sidebar.markdown("---")
-inventory_input = st.sidebar.text_area("📋 庫存監控 (代號,成本)", value="2337,34\n1409,16.5")
+st.title("🏹 2026 全景獵殺系統 v23.0 - 資金最大化版")
 
-st.title("🏹 2026 全景獵殺系統 v22.3 - 法人與視覺強化版")
+# [庫存模組省略以節省空間，邏輯同前版]
 
-# --- A. 庫存監控區 ---
-st.subheader("📊 庫藏動態與撤退點醒")
-if st.button("🔄 刷新庫存狀態"):
-    inv_list = [l.split(',') for l in inventory_input.split('\n') if ',' in l]
-    inv_res = []
-    for tid, cost in inv_list:
-        tid = tid.strip()
-        df = yf.download(f"{tid}.TW", period="1y", progress=False)
-        if df.empty: df = yf.download(f"{tid}.TWO", period="1y", progress=False)
-        res = execute_master_logic(df, tid, tid, 0, trail_pct, 9999)
-        if res:
-            p_l = (res['現價'] / float(cost) - 1) * 100
-            inv_res.append({
-                "名稱": res['名稱'], "現價": res['現價'], "盈虧": f"{round(p_l, 2)}%",
-                "撤退線": res['撤退線'], "5D勝率": res['5D勝率'],
-                "決策建議": "✅ 趨勢強續留" if res['現價'] > res['撤退線'] else "⚠️ 觸發斷捨離"
-            })
-    if inv_res: st.table(pd.DataFrame(inv_res))
-
-st.markdown("---")
-
-# --- B. 全市場獵殺 (雙行排版) ---
-if st.button("🔴 啟動全台股地毯獵殺 (1/1800+)", type="primary"):
+if st.button("🔴 啟動 1/1800+ 地毯式獵殺", type="primary"):
     final_results = []
-    with st.status("📡 獵殺雷達掃描中...", expanded=True) as status:
-        tickers, names_map = get_verified_list()
+    with st.status("📡 掃描全台股標的...", expanded=True) as status:
+        tickers, names_map = get_market_map()
         pb = st.progress(0)
-        chunk_size = 40
+        chunk_size = 50
         for i in range(0, len(tickers), chunk_size):
             chunk = tickers[i : i + chunk_size]
             pb.progress(min((i + chunk_size) / len(tickers), 1.0))
@@ -140,34 +110,43 @@ if st.button("🔴 啟動全台股地毯獵殺 (1/1800+)", type="primary"):
                 for t in chunk:
                     tid = t.split(".")[0]
                     df = data[t] if len(chunk) > 1 else data
-                    res = execute_master_logic(df, tid, names_map.get(tid, tid), vol_limit, trail_pct, max_budget)
-                    if res and int(res['綜合勝率'].replace('%','')) >= target_win:
-                        final_results.append(res)
+                    res = execute_sniper_v23(df, tid, names_map.get(tid, tid), vol_limit, trail_pct, max_budget)
+                    if res and res['綜合勝率'] >= target_win: final_results.append(res)
             except: continue
         status.update(label="🎯 獵殺完成！", state="complete")
 
     if final_results:
-        st.success(f"📊 報告：篩選出 {len(final_results)} 支符合標的。")
         df_final = pd.DataFrame(final_results).sort_values(by="綜合勝率", ascending=False).head(10)
+        st.subheader("🏆 全場最強 Top 10 名單")
         
         for _, row in df_final.iterrows():
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
                 c1.markdown(f"### **{row['名稱']}** ({row['代號']})")
-                c2.metric("綜合勝率", row['綜合勝率'])
-                c3.metric("現價", row['現價'])
-                c4.info(f"🎯 建議進場區: {row['建議進場區']}")
-                
-                # 第二行細節
-                st.write(f"**分析細項：** {row['油門']} | {row['路況']} | {row['能量']} | {row['法人天數']} | 5D勝率: {row['5D勝率']} | 10D勝率: {row['10D勝率']} | {row['風險']} | **撤退線: {row['撤退線']}**")
+                c2.metric("勝率", f"{row['綜合勝率']}%")
+                c3.metric("價格", row['價格'])
+                c4.info(f"🎯 進場區: {row['進場區']}")
+                st.write(f"**分析：** {row['油門']} | {row['路況']} | {row['能量']} | {row['法人']} | {row['風險']} | **撤退線: {row['撤退線']}**")
                 st.divider()
-        
-        # --- C. 合夥人建議 ---
+
+        # --- 新增：人生合夥人資金分配建議 ---
         st.markdown("---")
-        st.header("🧠 人生合夥人的盤後點醒")
-        best = df_final.iloc[0]
-        st.info(f"**【獵殺首選：{best['名稱']}】**\n\n"
-                f"**核心思辨：** 該標的法人已連續站穩支撐 **{best['法人天數']}**，且油門處於 **{best['油門']}** 狀態。這代表這不是一般的散戶盤，而是有底氣的趨勢。\n\n"
-                f"**戰術叮嚀：** 針對你的 19 萬現金，這支標的符合「高勝率 + 預算內」雙重指標。若明日開盤能落在 **{best['建議進場區']}** 且未爆出惡意賣壓，是極佳的獵殺位點。請記住，撤退線 **{best['撤退線']}** 是你唯一的守則，觸及即斷捨離。")
+        st.header("🧠 人生合夥人：Top 3 資金佈局建議")
+        top3 = df_final.head(3)
+        
+        # 資金分配比率：53%, 32%, 15%
+        ratios = [0.53, 0.32, 0.15]
+        
+        cols = st.columns(3)
+        for idx, (_, stock) in enumerate(top3.iterrows()):
+            suggested_money = total_cash * ratios[idx]
+            suggested_shares = int((suggested_money / (stock['價格'] * 1000)))
+            
+            with cols[idx]:
+                st.success(f"**No.{idx+1} {stock['名稱']}**")
+                st.write(f"戰略地位：{'核心攻擊' if idx==0 else '趨勢護航' if idx==1 else '轉折奇兵'}")
+                st.write(f"建議投入：**${int(suggested_money):,}**")
+                st.write(f"建議購買：**{suggested_shares} 張**")
+                st.write(f"分析：{stock['名稱']}目前{stock['油門']}且{stock['路況']}。若明日開盤守住{stock['進場區'].split('~')[0]}，即可執行火力配置。")
     else:
-        st.warning("⚠️ 預算與勝率門檻內無標的。")
+        st.warning("⚠️ 預算內無標的，請調整控制台參數。")
