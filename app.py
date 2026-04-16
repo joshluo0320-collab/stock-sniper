@@ -4,75 +4,64 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import urllib3
+import os
+from datetime import datetime
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 核心獵殺邏輯 (v23.2 旗艦修正版)
+# 1. 系統參數 (19 萬科學博弈設定)
 # ============================================
-def execute_sniper_v23(df, tid, name, vol_gate, trail_p, max_budget):
+TOTAL_BUDGET = 190000
+MAX_POSITIONS = 3
+PER_STOCK_BUDGET = 60000
+FRICTION_COST = 0.005  # 手續費 + 稅 + 滑價 (合計 0.5%)
+REPORT_FILE = "v23_sim_report.csv"
+
+# 初始化/獲取報表
+def get_report():
+    if not os.path.exists(REPORT_FILE):
+        df = pd.DataFrame(columns=[
+            "狀態", "名稱", "代號", "進場日期", "進場價", "股數", 
+            "當前撤退線", "出場日期", "出場價", "損益金額", "報酬率"
+        ])
+        df.to_csv(REPORT_FILE, index=False, encoding='utf-8-sig')
+    return pd.read_csv(REPORT_FILE, encoding='utf-8-sig')
+
+# ============================================
+# 2. 核心獵殺邏輯 (v23.2 佛系優化版)
+# ============================================
+def execute_sniper_v23(df, tid, name, trail_p):
     try:
         if df.empty or len(df) < 40: return None
-        
-        # 處理 yfinance 多重索引問題並清洗無效數據
-        if isinstance(df.columns, pd.MultiIndex): 
-            df.columns = df.columns.get_level_values(0)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
 
-        # 基礎現價 (取到小數點第一位)
-        last_p = round(float(df['Close'].iloc[-1]), 1) 
-        if last_p > max_budget: return None
-
-        # --- [ATR 波動力分析：這是踢除遠傳、亞泥的核心門檻] ---
-        tr = pd.concat([
-            df['High'] - df['Low'], 
-            abs(df['High'] - df['Close'].shift(1)), 
-            abs(df['Low'] - df['Close'].shift(1))
-        ], axis=1).max(axis=1)
-        atr_14 = tr.rolling(14).mean().iloc[-1]
-        volatility_ratio = (atr_14 / last_p) * 100
-        
-        # 指標計算：5MA 與 MACD 斜率
+        last_p = round(float(df['Close'].iloc[-1]), 1)
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
-        ema_12 = df['Close'].ewm(span=12).mean()
-        ema_26 = df['Close'].ewm(span=26).mean()
-        macd_slope = (ema_12 - ema_26).diff().iloc[-1]
         
-        # 20日高點突破判斷
-        high_20 = df['High'].rolling(20).max().shift(1).iloc[-1]
-        is_break = last_p > high_20
+        # [佛系過濾]：乖離過大不追 (避免 10:00 買在最高點)
+        if last_p > ma5 * 1.05: return None 
+
+        # [ATR 波動力]：踢除心跳停止的牛皮股
+        tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift(1)), abs(df['Low']-df['Close'].shift(1))], axis=1).max(axis=1)
+        atr_ratio = (tr.rolling(14).mean().iloc[-1] / last_p) * 100
+        if atr_ratio < 1.5: return None
+
+        # [動能指標]
+        macd_slope = (df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()).diff().iloc[-1]
+        is_break = last_p > df['High'].rolling(20).max().shift(1).iloc[-1]
         
-        # 量比計算
-        avg_v_5 = df['Volume'].tail(5).mean() / 1000
-        v_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v_5 if avg_v_5 > 0 else 0
+        # [綜合勝率]
+        score = int(((50 if last_p > ma5 else 0) * 0.4) + ((50 if macd_slope > 0 else -20) * 0.6) + (10 if is_break else 0))
+        withdrawal_line = round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 1)
 
-        # 綜合勝率評分
-        win_score = int(((50 if last_p > ma5 else 0) * 0.4) + ((50 if macd_slope > 0 else -20) * 0.6) + (10 if is_break else 0))
-        
-        # 動態撤退線 (取到小數點第一位)
-        dynamic_trail = min(max(trail_p, 3.5), 7.0) 
-        withdrawal_line = round(float(df['High'].cummax().iloc[-1] * (1 - dynamic_trail/100)), 1)
-
-        # 隔日沖風險辨識 (量比過高且漲幅大)
-        today_ret = (df['Close'].iloc[-1] / df['Close'].iloc[-2] - 1) * 100
-        risk_label = "⚠️ 隔日沖" if (v_ratio > 2.8 and today_ret > 6) else "✅ 穩健"
-
-        return {
-            "名稱": name, "代號": tid, "勝率": win_score,
-            "現價": last_p, "撤退線": withdrawal_line, 
-            "波動力(ATR)": f"{round(volatility_ratio, 2)}%",
-            "油門": "🏎️ 加速" if macd_slope > 0 else "🐢 減速",
-            "能量": "⛽ 爆量" if v_ratio > 1.5 else "🚗 正常",
-            "路況": "🛣️ 無壓" if is_break else "🚧 有牆",
-            "建議進場區": f"{round(last_p * 0.98, 1)}~{round(last_p * 0.995, 1)}",
-            "風險": risk_label,
-            "ATR_VAL": volatility_ratio # 隱藏過濾指標
-        }
+        return {"代號": tid, "名稱": name, "勝率": score, "現價": last_p, "撤退線": withdrawal_line, "ATR": atr_ratio}
     except: return None
 
 # ============================================
-# 2. 名單抓取工具
+# 3. 名單抓取工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -81,8 +70,7 @@ def get_market_map():
     for url in urls:
         try:
             res = requests.get(url, verify=False, timeout=10)
-            res.encoding = 'big5'
-            soup = BeautifulSoup(res.text, 'lxml')
+            res.encoding = 'big5'; soup = BeautifulSoup(res.text, 'lxml')
             for row in soup.find_all('tr'):
                 tds = row.find_all('td')
                 if len(tds) > 0:
@@ -94,96 +82,105 @@ def get_market_map():
     return tickers, names_map
 
 # ============================================
-# 3. Streamlit UI 戰略介面 (PM 規格)
+# 4. Streamlit UI 戰略中樞
 # ============================================
-st.set_page_config(page_title="獵殺系統 v23.2", layout="wide")
+st.set_page_config(page_title="v23.2 模擬實證實驗室", layout="wide")
+st.title("🏹 v23.2 科學博弈實證系統 (19萬沙盒)")
 
-st.sidebar.header("🕹️ 獵殺控制台")
-# 操作調整 1-3：修正步進單位
-target_win = st.sidebar.slider("🎯 勝率門檻 (%)", 10, 95, 60, step=5)
+# 側邊欄控制
+st.sidebar.header("🕹️ 實驗參數設定")
+target_win = st.sidebar.slider("🎯 買入勝率門檻", 60, 95, 80, step=5)
+trail_pct = st.sidebar.slider("🛡️ 止盈回落 (%)", 1.0, 10.0, 5.0, step=1.0)
 vol_limit = st.sidebar.slider("🌊 均張門檻", 0, 10000, 500, step=500)
-trail_pct = st.sidebar.slider("🛡️ 止盈回落 (%)", 1.0, 15.0, 5.0, step=1.0)
-max_budget = st.sidebar.number_input("💸 單張預算上限 (元)", value=250)
 
-st.sidebar.markdown("---")
-inventory_input = st.sidebar.text_area("📋 庫存監控 (代號,成本)", value="2337,34")
+# --- A. 模擬報表區 ---
+report = get_report()
+active_trades = report[report["狀態"] == "持有中"]
+closed_trades = report[report["狀態"] == "已結案"]
 
-st.title("🏹 2026 獵殺系統 v23.2 - 戰力排名版")
-
-# --- A. 庫存檢視模組 ---
-st.subheader("📊 庫藏動態與撤退點醒")
-if st.button("🔄 刷新庫存狀態"):
-    inv_list = [l.split(',') for l in inventory_input.split('\n') if ',' in l]
-    inv_data = []
-    for tid, cost in inv_list:
-        tid = tid.strip()
-        df = yf.download(f"{tid}.TW", period="6mo", progress=False)
-        if df.empty: df = yf.download(f"{tid}.TWO", period="6mo", progress=False)
-        res = execute_sniper_v23(df, tid, tid, 0, trail_pct, 9999)
-        if res:
-            p_l = (float(res['現價']) / float(cost) - 1) * 100
-            inv_data.append({
-                "代號": tid, "現價": res['現價'], "盈虧": f"{round(p_l, 1)}%",
-                "撤退線": res['撤退線'], "狀態": res['油門'], "波動力": res['波動力(ATR)'],
-                "決策": "✅ 續留" if float(res['現價']) > float(res['撤退線']) else "⚠️ 斷捨離"
-            })
-    if inv_data:
-        df_inv = pd.DataFrame(inv_data)
-        df_inv.index = range(1, len(df_inv) + 1) # 強制顯示為 1, 2, 3...
-        st.table(df_inv)
-
-st.markdown("---")
-
-# --- B. 全市場獵殺模組 (1.5% ATR 門檻) ---
-if st.button("🔴 啟動全台股地毯獵殺", type="primary"):
-    final_results = []
-    tickers, names_map = get_market_map()
-    with st.status("📡 掃描 1,800+ 標的，過濾 ATR < 1.5% 之牛皮股...", expanded=True) as status:
-        pb = st.progress(0)
-        chunk_size = 60
-        for i in range(0, len(tickers), chunk_size):
-            chunk = tickers[i : i + chunk_size]
-            pb.progress(min((i + chunk_size) / len(tickers), 1.0))
-            try:
-                data = yf.download(chunk, period="6mo", group_by='ticker', progress=False)
-                for t in chunk:
-                    tid = t.split(".")[0]
-                    df_stock = data[t] if len(chunk) > 1 else data
-                    res = execute_sniper_v23(df_stock, tid, names_map.get(tid, tid), vol_limit, trail_pct, max_budget)
-                    
-                    # 戰略過濾：ATR 必須大於 1.5% (踢掉亞泥、遠傳)
-                    if res and res['ATR_VAL'] >= 1.5 and res['勝率'] >= target_win:
-                        final_results.append(res)
-            except: continue
-        status.update(label="🎯 獵殺篩選完成！", state="complete")
-
-    if final_results:
-        st.subheader("🏆 全場最強戰力排名 (已過濾牛皮股)")
-        # 1. 轉為 DataFrame 並排序
-        df_res = pd.DataFrame(final_results).sort_values(by="勝率", ascending=False).head(10)
-        
-        # 2. 強制排名編號：1, 2, 3...
-        df_res.index = range(1, len(df_res) + 1)
-        
-        # 3. 修正顯示：價格到小數點第一位，勝率加上 %
-        df_res['現價'] = df_res['現價'].map('{:,.1f}'.format)
-        df_res['撤退線'] = df_res['撤退線'].map('{:,.1f}'.format)
-        df_res['勝率'] = df_res['勝率'].map('{}%'.format)
-        
-        # 4. 移除隱藏計算欄位
-        df_res = df_res.drop(columns=['ATR_VAL'])
-        
-        st.table(df_res)
+col1, col2 = st.columns([2, 1])
+with col1:
+    st.subheader("🏃 當前持有部位")
+    if not active_trades.empty:
+        st.table(active_trades[["名稱", "代號", "進場日期", "進場價", "股數", "當前撤退線"]])
     else:
-        st.warning("⚠️ 目前無標的符合動能門檻，請維持空倉避險。")
+        st.info("目前無持有部位，請於 10:00 執行巡檢。")
 
-st.divider()
-# --- 底部圖例說明 ---
-st.info("💡 **獵人直觀提醒：**\n\n"
-        "1. **左側排名**：1 代表勝率與動能綜合評分最高的第一名標的。\n"
-        "2. **ATR (波動力)**：代表標的每日震幅。低於 1.5% (如遠傳、亞泥) 會自動被系統放生。\n"
-        "3. **⚠️ 隔日沖**：若出現在風險欄位，代表籌碼過熱，開盤切勿市價追高，建議等回測進場區。\n\n"
-        "**圖示說明：**\n"
-        "🏎️ **加速**：多頭動能強勁 | 🐢 **減速**：力道轉弱\n"
-        "🛣️ **無壓**：創新高無套牢盤 | 🚧 **有牆**：上方仍有賣壓\n"
-        "⛽ **爆量**：主力點火訊號 | 🚗 **正常**：波動溫和")
+with col2:
+    current_cash = TOTAL_BUDGET - (active_trades["進場價"] * active_trades["股數"]).sum()
+    st.metric("💰 剩餘可用現金", f"{int(current_cash)} 元")
+    st.metric("📦 當前持股數", f"{len(active_trades)} / {MAX_POSITIONS}")
+
+# --- B. 一鍵執行同步 (最核心按鈕) ---
+if st.button("🔴 執行定時巡檢 (選股 + 買賣同步)", type="primary"):
+    with st.status("正在同步報表與掃描市場...", expanded=True) as status:
+        # 1. 檢查賣出 (審判)
+        if not active_trades.empty:
+            st.write("🔍 正在檢查庫存是否觸發撤退...")
+            for idx, row in active_trades.iterrows():
+                suffix = ".TW" if len(str(row['代號'])) == 4 else "" # 簡化處理
+                data = yf.download(f"{row['代號']}{suffix}", period="5d", progress=False)
+                if data.empty: data = yf.download(f"{row['代號']}.TWO", period="5d", progress=False)
+                
+                if not data.empty:
+                    curr_p = round(float(data['Close'].iloc[-1]), 1)
+                    if curr_p < row['當前撤退線']:
+                        exit_price = round(curr_p * (1 - FRICTION_COST), 1)
+                        p_l = (exit_price - row['進場價']) * row['股數']
+                        report.at[idx, "狀態"] = "已結案"
+                        report.at[idx, "出場日期"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        report.at[idx, "出場價"] = exit_price
+                        report.at[idx, "損益金額"] = int(p_l)
+                        report.at[idx, "報酬率"] = f"{round((exit_price/row['進場價']-1)*100, 2)}%"
+                        st.warning(f"⚠️ {row['名稱']} 觸發撤退！結算損益: {int(p_l)} 元")
+
+        # 2. 掃描新獵物 (買入)
+        if len(report[report["狀態"] == "持有中"]) < MAX_POSITIONS:
+            st.write("📡 掃描全台股符合 v23.2 之獵物...")
+            tickers, names_map = get_market_map()
+            final_picks = []
+            chunk_size = 60
+            for i in range(0, len(tickers), chunk_size):
+                chunk = tickers[i : i + chunk_size]
+                try:
+                    data_chunk = yf.download(chunk, period="6mo", group_by='ticker', progress=False)
+                    for t in chunk:
+                        tid = t.split(".")[0]
+                        df_s = data_chunk[t] if len(chunk) > 1 else data_chunk
+                        res = execute_sniper_v23(df_s, tid, names_map.get(tid, tid), trail_pct)
+                        if res and res['勝率'] >= target_win:
+                            # 檢查成交量門檻
+                            if (df_s['Volume'].tail(5).mean() / 1000) >= vol_limit:
+                                final_picks.append(res)
+                except: continue
+            
+            # 排序並嘗試買入
+            final_picks = sorted(final_picks, key=lambda x: x['勝率'], reverse=True)
+            for pick in final_picks:
+                if len(report[report["狀態"] == "持有中"]) < MAX_POSITIONS:
+                    # 買入計算
+                    buy_price = round(pick['現價'] * (1 + FRICTION_COST), 1)
+                    qty = int(PER_STOCK_BUDGET / (buy_price * 1000)) * 1000
+                    if qty >= 1000:
+                        new_row = {
+                            "狀態": "持有中", "名稱": pick['名稱'], "代號": pick['代號'],
+                            "進場日期": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "進場價": buy_price, "股數": qty, "當前撤退線": pick['撤退線'],
+                            "出場日期": "-", "出場價": 0, "損益金額": 0, "報酬率": "-"
+                        }
+                        report = pd.concat([report, pd.DataFrame([new_row])], ignore_index=True)
+                        st.success(f"🚀 模擬進場: {pick['名稱']} ({qty}股) @ {buy_price}")
+        
+        report.to_csv(REPORT_FILE, index=False, encoding='utf-8-sig')
+        status.update(label="✅ 巡檢與報表同步完成", state="complete")
+    st.rerun()
+
+# --- C. 歷史紀錄區 ---
+if not closed_trades.empty:
+    st.divider()
+    st.subheader("📈 已結案歷史戰績")
+    st.table(closed_trades)
+    net_profit = closed_trades["損益金額"].sum()
+    st.write(f"📊 累計實驗淨損益： **{int(net_profit)} 元**")
+
+st.info("💡 **佛系操作指南**：請於每日 **10:00** 與 **13:15** 點擊上方紅鈕。系統會自動根據最新股價與 v23.2 邏輯處理帳本。")
