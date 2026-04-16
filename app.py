@@ -103,7 +103,7 @@ used_cash = (active_trades["進場價"] * active_trades["股數"]).sum()
 
 col1, col2 = st.columns([2, 1])
 with col1:
-    st.subheader("🏃 目前持有部位 (對齊像素：佳世達/兆豐金/富邦科技)")
+    st.subheader("🏃 目前持有部位")
     if not active_trades.empty:
         st.table(active_trades[["名稱", "代號", "進場日期", "進場價", "股數", "當前撤退線"]])
     else:
