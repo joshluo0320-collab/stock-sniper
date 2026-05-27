@@ -57,7 +57,7 @@ def is_market_open():
     return 900 <= current_time <= 1330
 
 # ============================================
-# 2. 核心戰略解讀引擎 (復刻圖 2 核心邏輯)
+# 2. 核心戰略解讀引擎 (徹底修正海象語法漏洞)
 # ============================================
 def execute_sniper_v23_3(df, tid, name, trail_p, min_price, max_price):
     try:
@@ -101,8 +101,11 @@ def execute_sniper_v23_3(df, tid, name, trail_p, min_price, max_price):
         
         withdrawal_line = round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 1)
 
+        # --- 修正處：改用最標準的字串處理，移除海象運算子 ---
+        clean_code = tid.split(".")[0]
+
         return {
-            "代號": parts_code := tid.split(".")[0], 
+            "代號": clean_code, 
             "股票名稱": name, 
             "綜合勝率": f"{score}%", 
             "↑氣勢分析": momentum_text, 
@@ -126,7 +129,7 @@ st.title("🏹 v23.3 科學博弈系統 (全上市 1000+ 戰略版)")
 report = get_report()
 active_trades = report[report["狀態"] == "持有中"]
 
-# --- 側邊欄控制台 (優化功能) ---
+# --- 側邊欄控制台 ---
 st.sidebar.header("🕹️ 戰略參數控制台")
 target_win = st.sidebar.slider("🎯 買入勝率門檻 (%)", 50, 100, 80, step=5)
 trail_pct = st.sidebar.slider("🛡️ 止盈回落 (%)", 1.0, 10.0, 5.0, step=1.0)
@@ -149,7 +152,6 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("🏃 當前系統持有部位")
     if not active_trades.empty:
-        # 強制小數點後第一位
         disp_active = active_trades.copy()
         disp_active["進場價"] = disp_active["進場價"].round(1)
         disp_active["當前撤退線"] = disp_active["當前撤退線"].round(1)
@@ -188,7 +190,6 @@ if st.button("🔴 啟動全台股 1,000+ 支標的之地毯式獵殺", type="pr
         
         radar_df = pd.DataFrame(radar_data)
         
-        # 篩選出符合門檻且通過安全路況的黃金候選股
         if not radar_df.empty:
             passed_df = radar_df[
                 (radar_df["raw_score"] >= target_win) & 
@@ -205,7 +206,6 @@ if st.button("🔴 啟動全台股 1,000+ 支標的之地毯式獵殺", type="pr
         st.success(f"📊 報告：全市場共篩選出 {len(passed_df)} 支符合獵殺門檻標的。")
         
         if not passed_df.empty:
-            # 格式化輸出
             display_df = passed_df.sort_values(by="raw_score", ascending=False).head(10)
             st.dataframe(display_df[["股票名稱", "代號", "綜合勝率", "↑氣勢分析", "路況分析", "能量分析", "今日收盤", "明日建議進場區"]], use_container_width=True, hide_index=True)
             
@@ -215,7 +215,6 @@ if st.button("🔴 啟動全台股 1,000+ 支標的之地毯式獵殺", type="pr
                 if current_active_count >= MAX_POSITIONS: break
                 if pick["raw_ticker"] in report[report["狀態"] == "持有中"]["代號"].values: continue
                 
-                # 計算可以買進的整股張數/股數
                 shares = int(PER_STOCK_BUDGET / (pick["今日收盤"] * (1 + FRICTION_COST)))
                 if shares > 0:
                     entry_p = round(pick["今日收盤"] * (1 + FRICTION_COST), 1)
