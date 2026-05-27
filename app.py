@@ -9,7 +9,7 @@ from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 系統參數與初始化 (v23.3 旗艦實證版)
+# 1. 系統參數與初始化
 # ============================================
 TOTAL_BUDGET = 190000
 MAX_POSITIONS = 3
@@ -23,14 +23,14 @@ def get_report():
         df.to_csv(REPORT_FILE, index=False, encoding='utf-8-sig')
     return pd.read_csv(REPORT_FILE, encoding='utf-8-sig')
 
-# 模擬實證名單 (依據系統重啟指令設定)
 def get_market_map():
-    tickers = ["2352.TW", "2886.TW", "0052.TW", "2317.TW"] # 已加入鴻海
+    # 實證名單
+    tickers = ["2352.TW", "2886.TW", "0052.TW", "2317.TW"]
     names_map = {"2352.TW": "佳世達", "2886.TW": "兆豐金", "0052.TW": "富邦科技", "2317.TW": "鴻海"}
     return tickers, names_map
 
 # ============================================
-# 2. 開盤時間檢查邏輯
+# 2. 開盤時間檢查邏輯 (僅用於顯示 UI 狀態與限制進場時間戳記)
 # ============================================
 def is_market_open():
     now = datetime.now()
@@ -39,7 +39,7 @@ def is_market_open():
     return 900 <= current_time <= 1330
 
 # ============================================
-# 3. 升級版核心獵殺邏輯 (v23.3)
+# 3. 核心獵殺邏輯 (v23.3 主升段優化)
 # ============================================
 def execute_sniper_v23_3(df, tid, name, trail_p):
     try:
@@ -50,14 +50,13 @@ def execute_sniper_v23_3(df, tid, name, trail_p):
         df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
         last_p = round(float(df['Close'].iloc[-1]), 1)
         
-        # --- v23.3 核心修改：以 10MA 取代 5MA，放寬限制至 8% ---
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
         ma10 = df['Close'].rolling(10).mean().iloc[-1]
         
-        # 瘋狂主升段濾網：偏離 10MA 超過 8% 才攔截
+        # 偏離 10MA 超過 8% 才攔截
         if last_p > ma10 * 1.08: return None 
 
-        # ATR 波動力濾網 (維持 1.5% 門檻)
+        # ATR 波動力濾網
         tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift(1)), abs(df['Low']-df['Close'].shift(1))], axis=1).max(axis=1)
         atr_ratio = (tr.rolling(14).mean().iloc[-1] / last_p) * 100
         if atr_ratio < 1.5: return None
@@ -70,18 +69,16 @@ def execute_sniper_v23_3(df, tid, name, trail_p):
         
         is_break = last_p > df['High'].rolling(20).max().shift(1).iloc[-1]
         
-        # 重新校準計分公式 (對齊 v23.2 權重架構並適應 10MA)
+        # 計分公式
         score = int(((50 if last_p > ma5 else 0) * 0.4) + ((50 if macd_slope > 0 else -20) * 0.6) + (10 if is_break else 0))
-        
-        # 動態撤退線計算
         withdrawal_line = round(float(df['High'].cummax().iloc[-1] * (1 - trail_p/100)), 1)
 
         return {"代號": tid, "名稱": name, "勝率": score, "現價": last_p, "撤退線": withdrawal_line, "ATR": atr_ratio}
-    except Exception as e: 
+    except: 
         return None
 
 # ============================================
-# 4. Streamlit UI 
+# 4. Streamlit UI
 # ============================================
 st.set_page_config(page_title="v23.3 模擬實證實驗室", layout="wide")
 st.title("🏹 v23.3 科學博弈實證系統 (主升段解鎖版)")
@@ -113,15 +110,18 @@ with col1:
 with col2:
     current_cash = TOTAL_BUDGET - (active_trades["進場價"] * active_trades["股數"]).sum()
     st.metric("💰 剩餘現金", f"{int(current_cash)} 元")
-    st.metric("⚖️ 市場狀態", "🟢 開盤中" if is_market_open() else "🔴 休市中")
+    
+    # 增加測試模式提示
+    market_status = is_market_open()
+    st.metric("⚖️ 市場狀態", "🟢 開盤中" if market_status else "🔴 休市中 (測試模式解鎖)")
 
 # ============================================
-# 5. 一鍵巡檢與同步自動化
+# 5. 一鍵巡檢與同步自動化 (已移除休市限制)
 # ============================================
 if st.button("🔴 執行定時巡檢 (選股 + 買賣同步)", type="primary"):
     with st.status("正在同步報表與掃描...", expanded=True) as status:
         
-        # 【SOP 1】檢查賣出 (審判點)
+        # 【SOP 1】檢查賣出 (無論開休市皆進行最新收盤價盤後清算)
         if not active_trades.empty:
             for idx, row in active_trades.iterrows():
                 data = yf.download(row['代號'], period="5d", progress=False)
@@ -129,7 +129,6 @@ if st.button("🔴 執行定時巡檢 (選股 + 買賣同步)", type="primary"):
                     if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
                     curr_p = round(float(data['Close'].iloc[-1]), 1)
                     
-                    # 跌破動態撤退線，強制模擬出場
                     if curr_p < row['當前撤退線']:
                         exit_price = round(curr_p * (1 - FRICTION_COST), 1)
                         p_l = (exit_price - row['進場價']) * row['股數']
@@ -140,41 +139,42 @@ if st.button("🔴 執行定時巡檢 (選股 + 買賣同步)", type="primary"):
                         report.at[idx, "報酬率"] = f"{round((exit_price/row['進場價']-1)*100, 2)}%"
                         st.warning(f"⚠️ {row['名稱']} ({row['代號']}) 已跌破撤退線，執行強制撤退！")
 
-        # 【SOP 2】檢查買入 (獵殺點)
-        if is_market_open():
-            current_active_count = len(report[report["狀態"] == "持有中"])
-            if current_active_count < MAX_POSITIONS:
-                tickers, names_map = get_market_map()
-                
-                for ticker in tickers:
-                    # 避免重複買入已持有標的
-                    if ticker in report[report["狀態"] == "持有中"]["代號"].values:
-                        continue
-                        
-                    if current_active_count >= MAX_POSITIONS:
-                        break
-                        
-                    # 抓取歷史數據進行科學計算
-                    hist_data = yf.download(ticker, period="60d", progress=False)
-                    pick = execute_sniper_v23_3(hist_data, ticker, names_map[ticker], trail_pct)
-                    
-                    if pick and pick["勝率"] >= target_win:
-                        # 計算單注可買股數 (不考慮整張，支持零股實證)
-                        shares = int(PER_STOCK_BUDGET / (pick["現價"] * (1 + FRICTION_COST)))
-                        if shares > 0:
-                            entry_p = round(pick["現價"] * (1 + FRICTION_COST), 1)
-                            new_trade = pd.DataFrame([{
-                                "狀態": "持有中", "名稱": pick["名稱"], "代號": pick["代號"],
-                                "進場日期": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                "進場價": entry_p, "股數": shares, "當前撤退線": pick["撤退線"],
-                                "出場日期": np.nan, "出場價": np.nan, "損益金額": 0, "報酬率": "0.0%"
-                            }])
-                            report = pd.concat([report, new_trade], ignore_index=True)
-                            current_active_count += 1
-                            st.success(f"🏹 獵殺成功！v23.3 系統已模擬買入 {pick['名稱']}共 {shares} 股，進場價：{entry_p}")
-        else:
-            st.info("🌙 目前非交易時段（09:00-13:30以外），僅更新撤退線，不觸發新買入。")
+        # 【SOP 2】檢查買入 (已解鎖：休市時以最後收盤價進行模擬買入測試)
+        current_active_count = len(report[report["狀態"] == "持有中"])
+        if current_active_count < MAX_POSITIONS:
+            tickers, names_map = get_market_map()
             
+            for ticker in tickers:
+                if ticker in report[report["狀態"] == "持有中"]["代號"].values:
+                    continue
+                    
+                if current_active_count >= MAX_POSITIONS:
+                    break
+                    
+                hist_data = yf.download(ticker, period="60d", progress=False)
+                pick = execute_sniper_v23_3(hist_data, ticker, names_map[ticker], trail_pct)
+                
+                if pick and pick["勝率"] >= target_win:
+                    shares = int(PER_STOCK_BUDGET / (pick["現價"] * (1 + FRICTION_COST)))
+                    if shares > 0:
+                        entry_p = round(pick["現價"] * (1 + FRICTION_COST), 1)
+                        
+                        # 標註進場時間（若休市則標註盤後測試）
+                        time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        if not market_status:
+                            time_str += " (盤後測試)"
+                            
+                        new_trade = pd.DataFrame([{
+                            "狀態": "持有中", "名稱": pick["名稱"], "代號": pick["代號"],
+                            "進場日期": time_str,
+                            "進場價": entry_p, "股數": shares, "當前撤退線": pick["撤退線"],
+                            "出場日期": np.nan, "出場價": np.nan, "損益金額": 0, "報酬率": "0.0%"
+                        }])
+                        report = pd.concat([report, new_trade], ignore_index=True)
+                        current_active_count += 1
+                        st.success(f"🏹 獵殺成功！v23.3 系統已模擬買入 {pick['名稱']} 共 {shares} 股，進場價：{entry_p}")
+        
+        # 儲存結果
         report.to_csv(REPORT_FILE, index=False, encoding='utf-8-sig')
-        status.update(label="✅ v23.3 巡檢同步完成", state="complete")
+        status.update(label="✅ v23.3 全天候巡檢同步完成", state="complete")
     st.rerun()
