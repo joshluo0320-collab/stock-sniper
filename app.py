@@ -9,7 +9,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 核心獵殺邏輯 (v23.3 主升段優化版)
+# 1. 核心獵殺邏輯 (v23.3 撤退線 bug 完全修復版)
 # ============================================
 def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
     try:
@@ -20,10 +20,10 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
             df.columns = df.columns.get_level_values(0)
         df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
 
-        # 基礎現價 (優化 1：嚴格四捨五入到整數)
+        # 基礎現價 (嚴格四捨五入到整數)
         last_p = int(round(float(df['Close'].iloc[-1]), 0))
         
-        # --- [優化 2：解鎖股價範圍過濾，拒絕零股] ---
+        # 股價範圍過濾，拒絕零股
         if not (min_price <= last_p <= max_price): return None
 
         # --- [ATR 波動力分析] ---
@@ -36,11 +36,11 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
         volatility_ratio = (atr_14 / last_p) * 100
         
         # 指標計算：10MA 與 MACD 斜率 (方案 B 核心：改為 10MA 緩衝)
-        ma5 = df['Close'].rolling(5).mean().iloc[-1]
         ma10 = df['Close'].rolling(10).mean().iloc[-1]
         
-        ema_12 = df['Close'].ewm(span=12).mean()
-        ema_26 = df['Close'].ewm(span=26).mean()
+        # 修復：加入 adjust=False 確保 Streamlit 刷新時指數均線不漂移
+        ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd_slope = (ema_12 - ema_26).diff().iloc[-1]
         
         # 20日高點突破判斷
@@ -56,9 +56,14 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
         if win_score < 0: win_score = 0
         if win_score > 100: win_score = 100
         
-        # 動態撤退線 (優化 1：嚴格四捨五入到整數)
+        # --- [🚨 BUG 重大修正：將最高價鎖定在「近20日最高價」，避免抓到大半年前的歷史幽靈高點] ---
+        recent_high = df['High'].tail(20).max()
         dynamic_trail = min(max(trail_p, 3.5), 7.0) 
-        withdrawal_line = int(round(float(df['High'].cummax().iloc[-1] * (1 - dynamic_trail/100)), 0))
+        withdrawal_line = int(round(float(recent_high * (1 - dynamic_trail/100)), 0))
+        
+        # 防呆機制：若計算出的撤退線極端大於現價，強迫以 10MA 為防守底線
+        if withdrawal_line >= last_p:
+            withdrawal_line = int(round(ma10, 0))
 
         # 隔日沖風險辨識 (量比過高且漲幅大)
         today_ret = (df['Close'].iloc[-1] / df['Close'].iloc[-2] - 1) * 100
@@ -71,15 +76,14 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
             "油門": "🏎️ 加速" if macd_slope > 0 else "🐢 減速",
             "能量": "⛽ 爆量" if v_ratio > 1.5 else "🚗 正常",
             "路況": "🛣️ 無壓" if is_break else "🚧 有牆",
-            # 進場區間同樣保持整數
             "建議進場區": f"{int(round(last_p * 0.98, 0))}~{int(round(last_p * 0.995, 0))}",
             "風險": risk_label,
-            "ATR_VAL": volatility_ratio # 隱藏過濾指標
+            "ATR_VAL": volatility_ratio 
         }
     except: return None
 
 # ============================================
-# 2. 名單抓取工具 (完美還原 v23.2 完備地基)
+# 2. 名單抓取工具 (完整 1800+ 映射)
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -94,7 +98,6 @@ def get_market_map():
                 tds = row.find_all('td')
                 if len(tds) > 0:
                     raw = tds[0].text.strip().split()
-                    # 還原 v23.2 基礎判斷，確保 100% 抓取 1800+ 完整名單
                     if len(raw) >= 2 and len(raw[0]) == 4 and raw[0].isdigit():
                         suffix = ".TW" if "strMode=2" in url else ".TWO"
                         tickers.append(f"{raw[0]}{suffix}")
@@ -103,7 +106,7 @@ def get_market_map():
     return tickers, names_map
 
 # ============================================
-# 3. Streamlit UI 戰略介面 (PM 規格)
+# 3. Streamlit UI 戰略介面
 # ============================================
 st.set_page_config(page_title="獵殺系統 v23.3", layout="wide")
 
@@ -112,18 +115,17 @@ target_win = st.sidebar.slider("🎯 勝率門檻 (%)", 10, 95, 60, step=5)
 vol_limit = st.sidebar.slider("🌊 均張門檻", 0, 10000, 500, step=500)
 trail_pct = st.sidebar.slider("🛡️ 止盈回落 (%)", 1.0, 15.0, 5.0, step=1.0)
 
-# --- [優化 2：股價區間控制台] ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("💰 拒絕零股！股價自選區間")
 min_price_input = st.sidebar.number_input("最低可容許股價 (元)", value=50.0, step=5.0)
-max_price_input = st.sidebar.number_input("最高可容許股價 (元)", value=190.0, step=10.0)
+max_price_input = st.sidebar.number_input("最高可容許股價 (元)", value=150.0, step=10.0)
 
 st.sidebar.markdown("---")
 inventory_input = st.sidebar.text_area("📋 庫存監控 (代號,成本)", value="2337,34")
 
 st.title("🏹 2026 獵殺系統 v23.3 - 主升段解鎖版")
 
-# --- A. 庫存檢視模組 (價格同步整數化) ---
+# --- A. 庫存檢視模組 ---
 st.subheader("📊 庫藏動態與撤退點醒")
 if st.button("🔄 刷新庫存狀態"):
     inv_list = [l.split(',') for l in inventory_input.split('\n') if ',' in l]
@@ -147,12 +149,10 @@ if st.button("🔄 刷新庫存狀態"):
 
 st.markdown("---")
 
-# --- B. 全市場獵殺模組 (完美回歸 v23.2 分批大數據架構) ---
+# --- B. 全市場獵殺模組 ---
 if st.button("🔴 啟動全台股地毯獵殺", type="primary"):
     final_results = []
     tickers, names_map = get_market_map()
-    
-    # 建立動態進度回顯，確保 1800+ 標的正常進入循環
     with st.status(f"📡 正在地毯式掃描全台股標的... 確保讀取數量：{len(tickers)} 檔", expanded=True) as status:
         pb = st.progress(0)
         chunk_size = 60
@@ -174,10 +174,8 @@ if st.button("🔴 啟動全台股地毯獵殺", type="primary"):
     if final_results:
         st.subheader(f"🏆 全場最強戰力排名 (股價區間: {int(min_price_input)}~{int(max_price_input)} 元)")
         df_res = pd.DataFrame(final_results).sort_values(by="勝率", ascending=False).head(10)
-        
         df_res.index = range(1, len(df_res) + 1)
         
-        # 優化 1：全介面價格欄位完全整數化（去除任何 .0 冗餘）
         df_res['現價'] = df_res['現價'].astype(float).map('{:,.0f}'.format)
         df_res['撤退線'] = df_res['撤退線'].astype(float).map('{:,.0f}'.format)
         df_res['勝率'] = df_res['勝率'].map('{}%'.format)
@@ -185,9 +183,4 @@ if st.button("🔴 啟動全台股地毯獵殺", type="primary"):
         df_res = df_res.drop(columns=['ATR_VAL'])
         st.table(df_res)
     else:
-        st.warning("⚠️ 目前無標的符合動能門檻，請維持空倉避險。建議調整股價自選區間或降低勝率門檻再試一次。")
-
-st.divider()
-st.info("💡 **獵人直觀提醒：**\n\n"
-        "1. **名單完整性修復**：已完全還原 v23.2 證交所全普通股映射算法，1800+ 檔地毯式掃描通道已重新完全暢通。\n"
-        "2. **視覺精確化**：現價、撤退線與進場區間均已完成「完全整數化」手術，剔除小數點，介面保持冷峻乾淨。")
+        st.warning("⚠️ 目前無標的符合動能門檻，請維持空倉避險。")
