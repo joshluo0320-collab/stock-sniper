@@ -9,7 +9,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================
-# 1. 核心獵殺邏輯 (v23.3 撤退線 bug 完全修復版)
+# 1. 核心獵殺邏輯 (v23.3 科技狂潮解鎖版)
 # ============================================
 def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
     try:
@@ -23,7 +23,7 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
         # 基礎現價 (嚴格四捨五入到整數)
         last_p = int(round(float(df['Close'].iloc[-1]), 0))
         
-        # 股價範圍過濾，拒絕零股
+        # 股價範圍過濾：在解鎖動能的同時，依然鋼鐵般守住整張交易的價格防線
         if not (min_price <= last_p <= max_price): return None
 
         # --- [ATR 波動力分析] ---
@@ -35,10 +35,9 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
         atr_14 = tr.rolling(14).mean().iloc[-1]
         volatility_ratio = (atr_14 / last_p) * 100
         
-        # 指標計算：10MA 與 MACD 斜率 (方案 B 核心：改為 10MA 緩衝)
+        # 指標計算：10MA 與 MACD 斜率
         ma10 = df['Close'].rolling(10).mean().iloc[-1]
         
-        # 修復：加入 adjust=False 確保 Streamlit 刷新時指數均線不漂移
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd_slope = (ema_12 - ema_26).diff().iloc[-1]
@@ -47,25 +46,31 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
         high_20 = df['High'].rolling(20).max().shift(1).iloc[-1]
         is_break = last_p > high_20
         
+        # 10MA 乖離率計算
+        bias_10 = ((last_p / ma10) - 1) * 100
+
+        # --- [🚨 戰略解鎖：依據妳的決策，將 10MA 追高阻斷門檻放寬至 15%] ---
+        if bias_10 > 15.0: return None
+
         # 量比計算
         avg_v_5 = df['Volume'].tail(5).mean() / 1000
         v_ratio = (df['Volume'].iloc[-1] / 1000) / avg_v_5 if avg_v_5 > 0 else 0
 
-        # 計分公式 (採用具主升段緩衝力的 10MA 基準)
+        # 計分公式 (維持 10MA 強勢主升段緩衝計分)
         win_score = int(((50 if last_p > ma10 else 0) * 0.4) + ((50 if macd_slope > 0 else -20) * 0.6) + (10 if is_break else 0))
         if win_score < 0: win_score = 0
         if win_score > 100: win_score = 100
         
-        # --- [🚨 BUG 重大修正：將最高價鎖定在「近20日最高價」，避免抓到大半年前的歷史幽靈高點] ---
+        # 修正版動態撤退線：鎖定 20 日內最高價，避免被歷史幽靈高點綁架
         recent_high = df['High'].tail(20).max()
         dynamic_trail = min(max(trail_p, 3.5), 7.0) 
         withdrawal_line = int(round(float(recent_high * (1 - dynamic_trail/100)), 0))
         
-        # 防呆機制：若計算出的撤退線極端大於現價，強迫以 10MA 為防守底線
+        # 撤退線防呆：若極端大於現價，強迫以 10MA 為防守底線
         if withdrawal_line >= last_p:
             withdrawal_line = int(round(ma10, 0))
 
-        # 隔日沖風險辨識 (量比過高且漲幅大)
+        # 隔日沖風險辨識
         today_ret = (df['Close'].iloc[-1] / df['Close'].iloc[-2] - 1) * 100
         risk_label = "⚠️ 隔日沖" if (v_ratio > 2.8 and today_ret > 6) else "✅ 穩健"
 
@@ -83,7 +88,7 @@ def execute_sniper_v23(df, tid, name, vol_gate, trail_p, min_price, max_price):
     except: return None
 
 # ============================================
-# 2. 名單抓取工具 (完整 1800+ 映射)
+# 2. 名單抓取工具 (1800+ 完整台股地圖)
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -123,7 +128,7 @@ max_price_input = st.sidebar.number_input("最高可容許股價 (元)", value=1
 st.sidebar.markdown("---")
 inventory_input = st.sidebar.text_area("📋 庫存監控 (代號,成本)", value="2337,34")
 
-st.title("🏹 2026 獵殺系統 v23.3 - 主升段解鎖版")
+st.title("🏹 2026 獵殺系統 v23.3 - 科技狂潮解鎖版")
 
 # --- A. 庫存檢視模組 ---
 st.subheader("📊 庫藏動態與撤退點醒")
@@ -172,7 +177,7 @@ if st.button("🔴 啟動全台股地毯獵殺", type="primary"):
         status.update(label="🎯 全台股地毯獵殺篩選完成！", state="complete")
 
     if final_results:
-        st.subheader(f"🏆 全場最強戰力排名 (股價區間: {int(min_price_input)}~{int(max_price_input)} 元)")
+        st.subheader(f"🏆 全場最強戰力排名 (股價區間: {int(min_price_input)}~{int(max_price_input)} 元，解鎖 15% 乖離)")
         df_res = pd.DataFrame(final_results).sort_values(by="勝率", ascending=False).head(10)
         df_res.index = range(1, len(df_res) + 1)
         
