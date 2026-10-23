@@ -3,20 +3,26 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from streamlit_local_storage import LocalStorage
 import urllib3
 import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v24.7", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v24.8", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 初始化瀏覽器端本地記憶體 (讓手機 App 捷徑也能獨立記憶)
-localS = LocalStorage()
+# 🛡️ 【安全防護】嘗試載入瀏覽器記憶套件，若雲端未安裝則自動安全降級，絕不崩潰
+HAS_LOCAL_STORAGE = False
+try:
+  from streamlit_local_storage import LocalStorage
+
+  localS = LocalStorage()
+  HAS_LOCAL_STORAGE = True
+except ImportError:
+  pass
 
 
 # ============================================
@@ -286,7 +292,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.7")
+st.sidebar.header("🕹️ 週輪動控制台 v24.8")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -300,43 +306,57 @@ max_price_input = st.sidebar.number_input(
 )
 
 # ============================================
-# 5. 主頁面內容與 LocalStorage 記憶系統
+# 5. 主頁面內容與智慧記憶系統
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (手機App本地記憶版)")
+st.title("🏹 2026 週級別動能輪動系統 (安全防護穩定版)")
 st.caption(
     "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
     " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
 )
 
-# 從裝置的 LocalStorage 讀取專屬庫存（不受手機 PWA 捷徑截斷網址影響）
-saved_inventory = localS.getItem("user_native_inventory")
-default_inv_text = (
-    saved_inventory
-    if saved_inventory is not None
-    else "2337, 70, 1000, 2026-10-19"
-)
+# 依據是否有成功載入 LocalStorage 決定資料來源
+if HAS_LOCAL_STORAGE:
+  saved_inventory = localS.getItem("user_native_inventory")
+  default_inv_text = (
+      saved_inventory
+      if saved_inventory is not None
+      else "2337, 70, 1000, 2026-10-19"
+  )
 
-with st.expander(
-    "⚙️ 【手機 App 專用】點此展開：編輯與儲存您的個人專屬庫存",
-    expanded=False,
-):
-  st.caption(
-      "格式：`代號, 成本, 股數, 買進日(可選)` （每行一檔，修改後務必點擊下方儲存按鈕）"
-  )
-  main_inventory_input = st.text_area(
-      "持倉內容編輯框", value=default_inv_text, height=130
-  )
-  if st.button("💾 永久儲存至此手機/電腦裝置", type="primary"):
-    localS.setItem("user_native_inventory", main_inventory_input)
-    st.success(
-        "✅ 儲存成功！此裝置的瀏覽器與手機 App 捷徑已永久綁定此份庫存紀錄。"
+  with st.expander(
+      "⚙️ 【本機記憶】點此展開：編輯與儲存您的個人專屬庫存", expanded=False
+  ):
+    st.caption("格式：`代號, 成本, 股數, 買進日(可選)` （每行一檔）")
+    main_inventory_input = st.text_area(
+        "持倉內容編輯框", value=default_inv_text, height=130
     )
-    st.rerun()
-
-# 實際生效的 inventory_input
-inventory_input = (
-    saved_inventory if saved_inventory is not None else default_inv_text
-)
+    if st.button("💾 永久儲存至此裝置", type="primary"):
+      localS.setItem("user_native_inventory", main_inventory_input)
+      st.success("✅ 儲存成功！此裝置已綁定您的庫存紀錄。")
+      st.rerun()
+  inventory_input = (
+      saved_inventory if saved_inventory is not None else default_inv_text
+  )
+else:
+  # 降級方案：使用穩健的網址參數記憶法 (st.query_params)
+  default_inv_text = (
+      st.query_params["inv"]
+      if "inv" in st.query_params
+      else "2337, 70, 1000, 2026-10-19"
+  )
+  with st.expander(
+      "⚙️ 【網址記憶】點此展開：編輯與更新您的專屬庫存網址", expanded=False
+  ):
+    st.caption(
+        "格式：`代號, 成本, 股數, 買進日(可選)` （修改後點擊按鈕更新網址並加入書籤）"
+    )
+    main_inventory_input = st.text_area(
+        "持倉內容編輯框", value=default_inv_text, height=130
+    )
+    if st.button("💾 更新我的專屬庫存網址", type="primary"):
+      st.query_params["inv"] = main_inventory_input
+      st.success("✅ 網址已更新！請將本頁加入書籤，下次點開即是您的庫存。")
+  inventory_input = default_inv_text
 
 _, names_map = get_market_map()
 
