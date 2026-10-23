@@ -1,21 +1,16 @@
-import json
 from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from streamlit_local_storage import LocalStorage
 import urllib3
 import yfinance as yf
 
 # 1. 頁面基本配置
-st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.4", layout="wide")
+st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.5", layout="wide")
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# 初始化使用者端瀏覽器儲存空間 (每個使用者的設備各自獨立)
-localS = LocalStorage()
 
 
 # ============================================
@@ -98,7 +93,6 @@ def evaluate_inventory_holding(df_daily, cost_val):
 
   raw_roi = ((curr_p / cost_val) - 1) * 100
 
-  # 三階段動態防守線
   if raw_roi >= 15.0:
     dynamic_stop = round(max(high_4w * 0.93, ma5_w, cost_val * 1.05), 1)
     stage_label = "🦅 長波段鎖利"
@@ -284,9 +278,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄與個人化記憶系統 (LocalStorage)
+# 4. 側邊欄與網址參數記憶系統 (st.query_params)
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.4")
+st.sidebar.header("🕹️ 週輪動控制台 v24.5")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -300,37 +294,34 @@ max_price_input = st.sidebar.number_input(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📋 個人專屬庫存 (自動記憶)")
+st.sidebar.subheader("📋 個人專屬庫存 (專屬網址記憶)")
 st.sidebar.caption(
-    "💡 資料自動儲存於您個人的瀏覽器中，分享網址給他人時彼此資料完全獨立不干擾。"
+    "💡 點擊下方按鈕後，您的庫存會自動編碼至網址中。將該網址加入書籤，即可隨時叫出您的專屬庫存，與他人完全獨立不干擾！"
 )
 st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
 
-# 從使用者瀏覽器的 LocalStorage 讀取專屬庫存紀錄
-saved_inv = localS.getItem("user_personal_inventory")
+# 從網址參數中讀取專屬庫存 (若沒有則使用預設值)
 default_inv_text = (
-    saved_inv if saved_inv is not None else "2337, 70, 1000, 2026-10-19"
+    st.query_params["inv"]
+    if "inv" in st.query_params
+    else "2337, 70, 1000, 2026-10-19"
 )
 
 inventory_input = st.sidebar.text_area(
-    "編輯後點擊下方按鈕或按 Ctrl+Enter 即自動記憶",
-    value=default_inv_text,
-    height=150,
+    "編輯您的持倉內容", value=default_inv_text, height=150
 )
 
-# 儲存按鈕與自動同步機制
-if st.sidebar.button("💾 儲存我的個人庫存", use_container_width=True):
-  localS.setItem("user_personal_inventory", inventory_input)
-  st.sidebar.success("✅ 已成功記憶在此裝置瀏覽器中！")
-
-# 當輸入內容變更時，也自動在背景更新 LocalStorage
-if inventory_input != saved_inv and inventory_input.strip() != "":
-  localS.setItem("user_personal_inventory", inventory_input)
+# 儲存按鈕：將內容更新至網址參數中
+if st.sidebar.button("💾 產生/更新我的專屬庫存網址", use_container_width=True):
+  st.query_params["inv"] = inventory_input
+  st.sidebar.success(
+      "✅ 專屬網址已更新！請將瀏覽器當前頁面【加入書籤】，下次點開即是您的庫存。"
+  )
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (多用戶獨立記憶版)")
+st.title("🏹 2026 週級別動能輪動系統 (多用戶獨立網址版)")
 st.caption(
     "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
     " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
@@ -338,7 +329,7 @@ st.caption(
 
 _, names_map = get_market_map()
 
-# --- A. 庫存檢視模組 (搭載週線體質與移動停利模型) ---
+# --- A. 庫存檢視模組 ---
 st.subheader("📊 庫存週線體質診斷與移動鎖利戰情室")
 
 inv_lines = [
