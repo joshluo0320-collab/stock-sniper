@@ -7,7 +7,7 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 # 1. 頁面基本配置
-st.set_page_config(page_title="週動能獵殺系統 v24.2", layout="wide")
+st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.3", layout="wide")
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -42,12 +42,132 @@ def get_market_map():
 
 
 # ============================================
-# 3. 週動能波段核心邏輯 (Weekly Momentum Swing)
+# 3A. 庫存股專用：週線體質與續抱評估模型
+# ============================================
+def evaluate_inventory_holding(df_daily, cost_val):
+  """針對已持有部位（含低價長線部位與週五留倉部位），以週 K 結構評估是否續抱與動態移動停利線"""
+  if df_daily.empty or len(df_daily) < 60:
+    return None
+
+  if isinstance(df_daily.columns, pd.MultiIndex):
+    df_daily.columns = df_daily.columns.get_level_values(0)
+  df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+  curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
+
+  # 聚合為週 K 線
+  df_weekly = (
+      df_daily.resample("W-FRI")
+      .agg({
+          "Open": "first",
+          "High": "max",
+          "Low": "min",
+          "Close": "last",
+          "Volume": "sum",
+      })
+      .dropna()
+  )
+
+  if len(df_weekly) < 12:
+    return None
+
+  curr_w = df_weekly.iloc[-1]
+  w_open = float(curr_w["Open"])
+  w_high = float(curr_w["High"])
+  w_low = float(curr_w["Low"])
+  w_close = float(curr_w["Close"])
+  w_vol = float(curr_w["Volume"]) / 1000.0
+
+  # 週均線與近期高點
+  ma5_w = round(float(df_weekly["Close"].rolling(5).mean().iloc[-1]), 2)
+  ma10_w = round(float(df_weekly["Close"].rolling(10).mean().iloc[-1]), 2)
+  high_4w = float(df_weekly["High"].tail(4).max())
+
+  # 週量比與 K 線結構檢查 (是否爆量長上影線出貨)
+  avg_vol_4w = float(df_weekly["Volume"].iloc[-5:-1].mean()) / 1000.0
+  vol_ratio = round(w_vol / avg_vol_4w, 2) if avg_vol_4w > 0 else 1.0
+
+  w_range = w_high - w_low
+  upper_shadow = w_high - max(w_close, w_open)
+  is_shooting_star = (
+      ((upper_shadow / w_range) > 0.45 and vol_ratio > 1.6)
+      if w_range > 0
+      else False
+  )
+
+  # 計算當前帳面毛報酬率 (%)
+  raw_roi = ((curr_p / cost_val) - 1) * 100
+
+  # --- 三階段動態防守線 (Trailing Stop) ---
+  if raw_roi >= 15.0:
+    # 階段 3：大波段獲利巡航 (低價撿到的部位) -> 取「近4週高點回落7%」與「週5MA」較高者鎖死獲利
+    dynamic_stop = round(max(high_4w * 0.93, ma5_w, cost_val * 1.05), 1)
+    stage_label = "🦅 長波段鎖利"
+  elif raw_roi >= 5.0:
+    # 階段 2：已過保本線 -> 防守線至少為「成本+1%」或「週5MA / 本週低點」
+    dynamic_stop = round(max(cost_val * 1.01, min(w_low, ma5_w)), 1)
+    stage_label = "🛡️ 保本推進"
+  else:
+    # 階段 1：新建倉觀察期 -> 嚴守成本 -4.5% 或本週低點
+    dynamic_stop = round(max(cost_val * 0.955, w_low), 1)
+    stage_label = "🌱 新倉觀察"
+
+  # --- 庫存即時健康度計分與續抱判定 ---
+  health_score = 50
+  if curr_p >= ma5_w:
+    health_score += 25  # 站穩週 5MA (核心生命線)
+  else:
+    health_score -= 20
+
+  if curr_p >= ma10_w:
+    health_score += 15  # 站穩週 10MA (季線保護)
+
+  if w_close >= w_open and not is_shooting_star:
+    health_score += 10  # 週 K 紅棒且無出貨上影線
+  elif is_shooting_star:
+    health_score -= 15  # 爆量長上影線扣分
+
+  health_score = max(0, min(100, health_score))
+
+  # --- 模型最終操作建議 ---
+  if curr_p <= dynamic_stop:
+    color_tag = "🔴 觸線出場"
+    model_advice = (
+        f"🚨 跌破動態防守線 ({dynamic_stop})，建議收網獲利/停損落袋！"
+    )
+  elif curr_p < ma5_w:
+    color_tag = "🟡 趨勢轉弱"
+    model_advice = f"⚠️ 跌破週 5MA ({ma5_w})，動能衰退，建議週五減碼或了結"
+  elif is_shooting_star:
+    color_tag = "🟡 爆量上影"
+    model_advice = "⚠️ 本週出現爆量長上影線，主力有調節跡象，建議先出一半鎖利"
+  elif health_score >= 75:
+    color_tag = "🟢 強勢續抱"
+    model_advice = (
+        f"✅ 穩守週 5MA ({ma5_w}) 之上，週線多頭完整，可安心續抱過週末"
+    )
+  else:
+    color_tag = "⚪ 正常觀察"
+    model_advice = f"📈 守住防守線 ({dynamic_stop})，依紀律續抱觀察"
+
+  return {
+      "curr_p": curr_p,
+      "ma5_w": ma5_w,
+      "vol_ratio": f"{vol_ratio}x",
+      "health_score": health_score,
+      "stage_label": stage_label,
+      "dynamic_stop": dynamic_stop,
+      "color_tag": color_tag,
+      "model_advice": model_advice,
+  }
+
+
+# ============================================
+# 3B. 全市場掃描專用：週動能突破篩選器
 # ============================================
 def execute_weekly_sniper(
     df_daily, tid, name, min_price=30.0, max_price=200.0, min_weekly_vol=3000
 ):
-  """平日/假日相容：週線級別動能突破與階梯式風控模型"""
   try:
     if df_daily.empty or len(df_daily) < 60:
       return None
@@ -161,7 +281,7 @@ def execute_weekly_sniper(
         "週五操作策略": (
             "週五 13:00 全數了結"
             if not is_super_strong
-            else "創季高可留半倉，其餘出場"
+            else "創季高可留半倉，並移入庫存追蹤"
         ),
     }
   except Exception:
@@ -171,8 +291,8 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.2")
-target_win = st.sidebar.slider("🎯 動能評分門檻", 50, 95, 70, step=5)
+st.sidebar.header("🕹️ 週輪動控制台 v24.3")
+target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
 )
@@ -185,26 +305,27 @@ max_price_input = st.sidebar.number_input(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📋 庫存監控 (支援零股)")
+st.sidebar.subheader("📋 庫存與留倉追蹤 (支援零股)")
 st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
 inventory_input = st.sidebar.text_area(
-    "每行一檔標的", value="2337, 70, 1000, 2026-10-19", height=130
+    "低價長波段股 / 週五留倉股皆可記入",
+    value="2337, 70, 1000, 2026-10-19",
+    height=150,
 )
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (支援零股部位管理版)")
+st.title("🏹 2026 週級別動能輪動系統 (庫存週線智慧巡航版)")
 st.caption(
-    "💡 核心紀律：週末選股 ➔ 週一開盤進場 ➔ 週間智慧停損/保本 ➔ 週五 13:00"
-    " 無條件清倉變現（免受週末利空影響）"
+    "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
+    " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
 )
 
-# 預先載入股票名稱字典，讓庫存也能顯示中文股名
 _, names_map = get_market_map()
 
-# --- A. 庫存檢視模組 (支援零股股數與真實損益試算) ---
-st.subheader("📊 庫存動態與週結算戰情室")
+# --- A. 庫存檢視模組 (搭載週線體質與移動停利模型) ---
+st.subheader("📊 庫存週線體質診斷與移動鎖利戰情室")
 
 inv_lines = [
     l.strip()
@@ -214,8 +335,6 @@ inv_lines = [
 
 if inv_lines:
   inv_data = []
-  today_date = pd.Timestamp.now()
-  is_friday = today_date.weekday() == 4
 
   for line in inv_lines:
     parts = [p.strip() for p in line.split(",")]
@@ -223,12 +342,10 @@ if inv_lines:
       tid = parts[0]
       cost_val = float(parts[1])
 
-      # 智慧解析第 3 與第 4 個欄位 (相容舊格式與新零股格式)
-      shares = 1000  # 預設 1 張 (1000股)
+      shares = 1000
       buy_date = "未指定"
 
       if len(parts) == 3:
-        # 判斷第 3 欄是「日期」還是「股數」
         if "-" in parts[2] or "/" in parts[2]:
           buy_date = parts[2]
         else:
@@ -237,18 +354,17 @@ if inv_lines:
         shares = int(float(parts[2]))
         buy_date = parts[3]
 
-      df = yf.download(f"{tid}.TW", period="6mo", progress=False)
+      # 下載 1 年資料以確保週均線計算精準
+      df = yf.download(f"{tid}.TW", period="1y", progress=False)
       if df.empty:
-        df = yf.download(f"{tid}.TWO", period="6mo", progress=False)
+        df = yf.download(f"{tid}.TWO", period="1y", progress=False)
 
-      if not df.empty:
-        if isinstance(df.columns, pd.MultiIndex):
-          df.columns = df.columns.get_level_values(0)
-
-        curr_p = round(float(df["Close"].iloc[-1]), 2)
+      eval_res = evaluate_inventory_holding(df, cost_val)
+      if eval_res:
+        curr_p = eval_res["curr_p"]
         stock_name = names_map.get(tid, tid)
 
-        # 計算真實金額 (含手續費 0.1425% 與證交稅 0.3% 概算)
+        # 計算含稅費之真實淨損益
         raw_cost_total = cost_val * shares
         buy_fee = max(1, int(raw_cost_total * 0.001425))
         total_invested = int(raw_cost_total + buy_fee)
@@ -260,42 +376,20 @@ if inv_lines:
         net_profit_ntd = net_market_val - total_invested
         p_l_pct = round((net_profit_ntd / total_invested) * 100, 2)
 
-        # 階梯防守價位
-        hard_stop = round(cost_val * 0.955, 1)
-        be_trigger = round(cost_val * 1.05, 1)
-        target_p = round(cost_val * 1.08, 1)
-
-        if curr_p <= hard_stop:
-          action = "🚨 觸及停損 (立即出場)"
-          color_tag = "🔴 停損"
-        elif is_friday:
-          action = (
-              "⏳ 週五結算日 (13:00 清倉變現)"
-              if curr_p < target_p
-              else "🚀 達標！收網獲利"
-          )
-          color_tag = "🟡 結算"
-        elif curr_p >= be_trigger:
-          action = "🛡️ 已達 +5%，券商掛成本價保本"
-          color_tag = "🟢 保本"
-        else:
-          action = "📈 正常抱牢中"
-          color_tag = "⚪ 持續"
-
         inv_data.append({
             "代號": tid,
             "名稱": stock_name,
-            "買進日": buy_date,
             "持有股數": f"{shares:,} 股",
             "成本均價": cost_val,
             "當前現價": curr_p,
-            "預估淨損益(元)": f"{net_profit_ntd:+,} 元",
-            "報酬率": f"{p_l_pct:+.2f}%",
-            "初始停損(-4.5%)": hard_stop,
-            "保本線(+5%)": be_trigger,
-            "目標線(+8%)": target_p,
-            "戰術燈號": color_tag,
-            "當前執行指引": action,
+            "預估淨損益": f"{net_profit_ntd:+,} 元",
+            "淨報酬率": f"{p_l_pct:+.2f}%",
+            "持倉階段": eval_res["stage_label"],
+            "週5MA生命線": eval_res["ma5_w"],
+            "動態鎖利/防守線": eval_res["dynamic_stop"],
+            "週體質分": f"{eval_res['health_score']} 分",
+            "續抱燈號": eval_res["color_tag"],
+            "模型續抱/出場診斷": eval_res["model_advice"],
             "raw_invested": total_invested,
             "raw_market_val": net_market_val,
             "raw_profit": net_profit_ntd,
@@ -306,7 +400,6 @@ if inv_lines:
   if inv_data:
     df_inv = pd.DataFrame(inv_data)
 
-    # 頂部財務戰情室指標卡片
     sum_invested = df_inv["raw_invested"].sum()
     sum_market = df_inv["raw_market_val"].sum()
     sum_profit = df_inv["raw_profit"].sum()
@@ -323,9 +416,15 @@ if inv_lines:
         delta=f"{total_roi:+.2f}%",
     )
     alert_count = len(
-        df_inv[df_inv["戰術燈號"].isin(["🔴 停損", "🟡 結算"])]
+        df_inv[
+            df_inv["續抱燈號"].isin([
+                "🔴 觸線出場",
+                "🟡 趨勢轉弱",
+                "🟡 爆量上影",
+            ])
+        ]
     )
-    col4.metric("需即時處理檔數", f"{alert_count} / {len(df_inv)} 檔")
+    col4.metric("需減碼/出場警示", f"{alert_count} / {len(df_inv)} 檔")
 
     display_df = df_inv.drop(
         columns=["raw_invested", "raw_market_val", "raw_profit"]
@@ -335,13 +434,13 @@ if inv_lines:
 else:
   st.info(
       "💡 請在側邊欄輸入持倉，格式：`代號, 成本, 股數, 買進日`，例如：`2337, 70,"
-      " 350, 2026-10-19`"
+      " 1000, 2026-10-19`"
   )
 
 st.markdown("---")
 
 # --- B. 全市場週動能掃描模組 ---
-if st.button("🔴 啟動全市場週動能掃描 (全台股)", type="primary"):
+if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type="primary"):
   final_results = []
   tickers, _ = get_market_map()
 
