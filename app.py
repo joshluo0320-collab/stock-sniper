@@ -1,16 +1,21 @@
+import json
+from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit_local_storage import LocalStorage
 import urllib3
 import yfinance as yf
-from bs4 import BeautifulSoup
 
 # 1. 頁面基本配置
-st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.3", layout="wide")
+st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.4", layout="wide")
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 初始化使用者端瀏覽器儲存空間 (每個使用者的設備各自獨立)
+localS = LocalStorage()
 
 
 # ============================================
@@ -45,7 +50,6 @@ def get_market_map():
 # 3A. 庫存股專用：週線體質與續抱評估模型
 # ============================================
 def evaluate_inventory_holding(df_daily, cost_val):
-  """針對已持有部位（含低價長線部位與週五留倉部位），以週 K 結構評估是否續抱與動態移動停利線"""
   if df_daily.empty or len(df_daily) < 60:
     return None
 
@@ -55,7 +59,6 @@ def evaluate_inventory_holding(df_daily, cost_val):
 
   curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
 
-  # 聚合為週 K 線
   df_weekly = (
       df_daily.resample("W-FRI")
       .agg({
@@ -78,12 +81,10 @@ def evaluate_inventory_holding(df_daily, cost_val):
   w_close = float(curr_w["Close"])
   w_vol = float(curr_w["Volume"]) / 1000.0
 
-  # 週均線與近期高點
   ma5_w = round(float(df_weekly["Close"].rolling(5).mean().iloc[-1]), 2)
   ma10_w = round(float(df_weekly["Close"].rolling(10).mean().iloc[-1]), 2)
   high_4w = float(df_weekly["High"].tail(4).max())
 
-  # 週量比與 K 線結構檢查 (是否爆量長上影線出貨)
   avg_vol_4w = float(df_weekly["Volume"].iloc[-5:-1].mean()) / 1000.0
   vol_ratio = round(w_vol / avg_vol_4w, 2) if avg_vol_4w > 0 else 1.0
 
@@ -95,41 +96,35 @@ def evaluate_inventory_holding(df_daily, cost_val):
       else False
   )
 
-  # 計算當前帳面毛報酬率 (%)
   raw_roi = ((curr_p / cost_val) - 1) * 100
 
-  # --- 三階段動態防守線 (Trailing Stop) ---
+  # 三階段動態防守線
   if raw_roi >= 15.0:
-    # 階段 3：大波段獲利巡航 (低價撿到的部位) -> 取「近4週高點回落7%」與「週5MA」較高者鎖死獲利
     dynamic_stop = round(max(high_4w * 0.93, ma5_w, cost_val * 1.05), 1)
     stage_label = "🦅 長波段鎖利"
   elif raw_roi >= 5.0:
-    # 階段 2：已過保本線 -> 防守線至少為「成本+1%」或「週5MA / 本週低點」
     dynamic_stop = round(max(cost_val * 1.01, min(w_low, ma5_w)), 1)
     stage_label = "🛡️ 保本推進"
   else:
-    # 階段 1：新建倉觀察期 -> 嚴守成本 -4.5% 或本週低點
     dynamic_stop = round(max(cost_val * 0.955, w_low), 1)
     stage_label = "🌱 新倉觀察"
 
-  # --- 庫存即時健康度計分與續抱判定 ---
   health_score = 50
   if curr_p >= ma5_w:
-    health_score += 25  # 站穩週 5MA (核心生命線)
+    health_score += 25
   else:
     health_score -= 20
 
   if curr_p >= ma10_w:
-    health_score += 15  # 站穩週 10MA (季線保護)
+    health_score += 15
 
   if w_close >= w_open and not is_shooting_star:
-    health_score += 10  # 週 K 紅棒且無出貨上影線
+    health_score += 10
   elif is_shooting_star:
-    health_score -= 15  # 爆量長上影線扣分
+    health_score -= 15
 
   health_score = max(0, min(100, health_score))
 
-  # --- 模型最終操作建議 ---
   if curr_p <= dynamic_stop:
     color_tag = "🔴 觸線出場"
     model_advice = (
@@ -289,9 +284,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄控制項
+# 4. 側邊欄與個人化記憶系統 (LocalStorage)
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.3")
+st.sidebar.header("🕹️ 週輪動控制台 v24.4")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -305,18 +300,37 @@ max_price_input = st.sidebar.number_input(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📋 庫存與留倉追蹤 (支援零股)")
+st.sidebar.subheader("📋 個人專屬庫存 (自動記憶)")
+st.sidebar.caption(
+    "💡 資料自動儲存於您個人的瀏覽器中，分享網址給他人時彼此資料完全獨立不干擾。"
+)
 st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
+
+# 從使用者瀏覽器的 LocalStorage 讀取專屬庫存紀錄
+saved_inv = localS.getItem("user_personal_inventory")
+default_inv_text = (
+    saved_inv if saved_inv is not None else "2337, 70, 1000, 2026-10-19"
+)
+
 inventory_input = st.sidebar.text_area(
-    "低價長波段股 / 週五留倉股皆可記入",
-    value="2337, 70, 1000, 2026-10-19",
+    "編輯後點擊下方按鈕或按 Ctrl+Enter 即自動記憶",
+    value=default_inv_text,
     height=150,
 )
+
+# 儲存按鈕與自動同步機制
+if st.sidebar.button("💾 儲存我的個人庫存", use_container_width=True):
+  localS.setItem("user_personal_inventory", inventory_input)
+  st.sidebar.success("✅ 已成功記憶在此裝置瀏覽器中！")
+
+# 當輸入內容變更時，也自動在背景更新 LocalStorage
+if inventory_input != saved_inv and inventory_input.strip() != "":
+  localS.setItem("user_personal_inventory", inventory_input)
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (庫存週線智慧巡航版)")
+st.title("🏹 2026 週級別動能輪動系統 (多用戶獨立記憶版)")
 st.caption(
     "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
     " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
@@ -354,7 +368,6 @@ if inv_lines:
         shares = int(float(parts[2]))
         buy_date = parts[3]
 
-      # 下載 1 年資料以確保週均線計算精準
       df = yf.download(f"{tid}.TW", period="1y", progress=False)
       if df.empty:
         df = yf.download(f"{tid}.TWO", period="1y", progress=False)
@@ -364,7 +377,6 @@ if inv_lines:
         curr_p = eval_res["curr_p"]
         stock_name = names_map.get(tid, tid)
 
-        # 計算含稅費之真實淨損益
         raw_cost_total = cost_val * shares
         buy_fee = max(1, int(raw_cost_total * 0.001425))
         total_invested = int(raw_cost_total + buy_fee)
