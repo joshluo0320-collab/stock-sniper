@@ -8,11 +8,21 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v24.9", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v24.8", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 🛡️ 【安全防護】嘗試載入瀏覽器記憶套件，若雲端未安裝則自動安全降級，絕不崩潰
+HAS_LOCAL_STORAGE = False
+try:
+  from streamlit_local_storage import LocalStorage
+
+  localS = LocalStorage()
+  HAS_LOCAL_STORAGE = True
+except ImportError:
+  pass
 
 
 # ============================================
@@ -280,9 +290,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄控制項與狀態初始化
+# 4. 側邊欄控制項
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.9")
+st.sidebar.header("🕹️ 週輪動控制台 v24.8")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -295,43 +305,58 @@ max_price_input = st.sidebar.number_input(
     "最高股價 (元)", value=180.0, step=10.0
 )
 
-# 使用 Streamlit 內建的 st.session_state 確保畫面運作流暢
-if "inventory_text" not in st.session_state:
-  st.session_state["inventory_text"] = "2337, 70, 1000, 2026-10-19"
-
 # ============================================
-# 5. 主頁面內容與「跨裝置設定碼」同步面板
+# 5. 主頁面內容與智慧記憶系統
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (跨裝置設定碼同步版)")
+st.title("🏹 2026 週級別動能輪動系統 (安全防護穩定版)")
 st.caption(
-    "💡 針對手機 App 隔離沙盒設計：您可以隨時在此修改持倉，或透過下方的『設定碼』在電腦與手機間完美同步。"
+    "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
+    " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
 )
 
-# 🚀 核心功能：設定碼同步專區 (解決手機 App 無法同步的問題)
-with st.expander(
-    "🔄 【跨裝置同步】點此展開：匯出或匯入您的庫存設定碼", expanded=True
-):
-  col_ex, col_im = st.columns(2)
+# 依據是否有成功載入 LocalStorage 決定資料來源
+if HAS_LOCAL_STORAGE:
+  saved_inventory = localS.getItem("user_native_inventory")
+  default_inv_text = (
+      saved_inventory
+      if saved_inventory is not None
+      else "2337, 70, 1000, 2026-10-19"
+  )
 
-  with col_ex:
-    st.markdown("**1️⃣ 從本機匯出設定碼**")
-    st.caption("將當前持倉轉為一串代碼，可複製到手機或備忘錄。")
-    # 提供當前庫存的字串供複製
-    st.code(st.session_state["inventory_text"], language="text")
-
-  with col_im:
-    st.markdown("**2️⃣ 在此貼上並載入設定碼**")
-    st.caption("將設定碼貼在下方，點擊載入即可同步更新。")
-    imported_code = st.text_area(
-        "貼上設定碼", value=st.session_state["inventory_text"], height=80
+  with st.expander(
+      "⚙️ 【本機記憶】點此展開：編輯與儲存您的個人專屬庫存", expanded=False
+  ):
+    st.caption("格式：`代號, 成本, 股數, 買進日(可選)` （每行一檔）")
+    main_inventory_input = st.text_area(
+        "持倉內容編輯框", value=default_inv_text, height=130
     )
-    if st.button("📥 立即載入並套用設定碼", type="primary"):
-      st.session_state["inventory_text"] = imported_code
-      st.success("✅ 庫存已同步更新完成！")
+    if st.button("💾 永久儲存至此裝置", type="primary"):
+      localS.setItem("user_native_inventory", main_inventory_input)
+      st.success("✅ 儲存成功！此裝置已綁定您的庫存紀錄。")
       st.rerun()
-
-# 實際生效的庫存內容
-inventory_input = st.session_state["inventory_text"]
+  inventory_input = (
+      saved_inventory if saved_inventory is not None else default_inv_text
+  )
+else:
+  # 降級方案：使用穩健的網址參數記憶法 (st.query_params)
+  default_inv_text = (
+      st.query_params["inv"]
+      if "inv" in st.query_params
+      else "2337, 70, 1000, 2026-10-19"
+  )
+  with st.expander(
+      "⚙️ 【網址記憶】點此展開：編輯與更新您的專屬庫存網址", expanded=False
+  ):
+    st.caption(
+        "格式：`代號, 成本, 股數, 買進日(可選)` （修改後點擊按鈕更新網址並加入書籤）"
+    )
+    main_inventory_input = st.text_area(
+        "持倉內容編輯框", value=default_inv_text, height=130
+    )
+    if st.button("💾 更新我的專屬庫存網址", type="primary"):
+      st.query_params["inv"] = main_inventory_input
+      st.success("✅ 網址已更新！請將本頁加入書籤，下次點開即是您的庫存。")
+  inventory_input = default_inv_text
 
 _, names_map = get_market_map()
 
@@ -441,7 +466,7 @@ if inv_lines:
     display_df.index = range(1, len(display_df) + 1)
     st.dataframe(display_df, use_container_width=True)
 else:
-  st.info("💡 請透過上方設定碼面板輸入您的持倉內容。")
+  st.info("💡 請點上方展開選單輸入持倉內容並儲存。")
 
 st.markdown("---")
 
