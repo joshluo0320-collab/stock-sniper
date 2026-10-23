@@ -3,14 +3,20 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit_local_storage import LocalStorage
 import urllib3
 import yfinance as yf
 
 # 1. 頁面基本配置
-st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.5", layout="wide")
+st.set_page_config(
+    page_title="週動能獵殺與持倉巡航系統 v24.7", page_icon="🏹", layout="wide"
+)
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 初始化瀏覽器端本地記憶體 (讓手機 App 捷徑也能獨立記憶)
+localS = LocalStorage()
 
 
 # ============================================
@@ -278,9 +284,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄與網址參數記憶系統 (st.query_params)
+# 4. 側邊欄控制項
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.5")
+st.sidebar.header("🕹️ 週輪動控制台 v24.7")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -293,38 +299,43 @@ max_price_input = st.sidebar.number_input(
     "最高股價 (元)", value=180.0, step=10.0
 )
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📋 個人專屬庫存 (專屬網址記憶)")
-st.sidebar.caption(
-    "💡 點擊下方按鈕後，您的庫存會自動編碼至網址中。將該網址加入書籤，即可隨時叫出您的專屬庫存，與他人完全獨立不干擾！"
-)
-st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
-
-# 從網址參數中讀取專屬庫存 (若沒有則使用預設值)
-default_inv_text = (
-    st.query_params["inv"]
-    if "inv" in st.query_params
-    else "2337, 70, 1000, 2026-10-19"
-)
-
-inventory_input = st.sidebar.text_area(
-    "編輯您的持倉內容", value=default_inv_text, height=150
-)
-
-# 儲存按鈕：將內容更新至網址參數中
-if st.sidebar.button("💾 產生/更新我的專屬庫存網址", use_container_width=True):
-  st.query_params["inv"] = inventory_input
-  st.sidebar.success(
-      "✅ 專屬網址已更新！請將瀏覽器當前頁面【加入書籤】，下次點開即是您的庫存。"
-  )
-
 # ============================================
-# 5. 主頁面內容
+# 5. 主頁面內容與 LocalStorage 記憶系統
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (多用戶獨立網址版)")
+st.title("🏹 2026 週級別動能輪動系統 (手機App本地記憶版)")
 st.caption(
     "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
     " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
+)
+
+# 從裝置的 LocalStorage 讀取專屬庫存（不受手機 PWA 捷徑截斷網址影響）
+saved_inventory = localS.getItem("user_native_inventory")
+default_inv_text = (
+    saved_inventory
+    if saved_inventory is not None
+    else "2337, 70, 1000, 2026-10-19"
+)
+
+with st.expander(
+    "⚙️ 【手機 App 專用】點此展開：編輯與儲存您的個人專屬庫存",
+    expanded=False,
+):
+  st.caption(
+      "格式：`代號, 成本, 股數, 買進日(可選)` （每行一檔，修改後務必點擊下方儲存按鈕）"
+  )
+  main_inventory_input = st.text_area(
+      "持倉內容編輯框", value=default_inv_text, height=130
+  )
+  if st.button("💾 永久儲存至此手機/電腦裝置", type="primary"):
+    localS.setItem("user_native_inventory", main_inventory_input)
+    st.success(
+        "✅ 儲存成功！此裝置的瀏覽器與手機 App 捷徑已永久綁定此份庫存紀錄。"
+    )
+    st.rerun()
+
+# 實際生效的 inventory_input
+inventory_input = (
+    saved_inventory if saved_inventory is not None else default_inv_text
 )
 
 _, names_map = get_market_map()
@@ -411,7 +422,7 @@ if inv_lines:
     )
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("總投入成本 (含摩擦成本)", f"NT$ {sum_invested:,}")
+    col1.metric("總投入成本 (含摩擦)", f"NT$ {sum_invested:,}")
     col2.metric("當前淨市值", f"NT$ {sum_market:,}")
     col3.metric(
         "帳面總淨損益",
@@ -435,10 +446,7 @@ if inv_lines:
     display_df.index = range(1, len(display_df) + 1)
     st.dataframe(display_df, use_container_width=True)
 else:
-  st.info(
-      "💡 請在側邊欄輸入持倉，格式：`代號, 成本, 股數, 買進日`，例如：`2337, 70,"
-      " 1000, 2026-10-19`"
-  )
+  st.info("💡 請點上方展開選單輸入持倉內容並儲存。")
 
 st.markdown("---")
 
