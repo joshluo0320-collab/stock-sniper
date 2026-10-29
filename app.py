@@ -7,14 +7,18 @@ import urllib3
 import yfinance as yf
 
 # 1. 頁面基本配置
-st.set_page_config(page_title="週動能獵殺與持倉巡航系統 v24.5", layout="wide")
+st.set_page_config(
+    page_title="週動能獵殺與持倉巡航系統 v25.0 (大盤濾網版)",
+    page_icon="🏹",
+    layout="wide",
+)
 
 # 禁用不安全請求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 名單抓取工具 (上市與上櫃股票代號)
+# 2. 名單抓取與大盤總開關工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -39,6 +43,32 @@ def get_market_map():
     except Exception:
       continue
   return tickers, names_map
+
+
+def check_market_macro_filter():
+  """下載台股加權指數 (^TWII)，檢驗是否站上 20MA (月線)"""
+  try:
+    df_market = yf.download("^TWII", period="3mo", progress=False)
+    if df_market.empty:
+      return True, 0, 0, "⚠️ 無法取得大盤資料，暫以預設通過處理。"
+
+    if isinstance(df_market.columns, pd.MultiIndex):
+      df_market.columns = df_market.columns.get_level_values(0)
+
+    df_market["MA20"] = df_market["Close"].rolling(window=20).mean()
+    curr_idx = float(df_market["Close"].iloc[-1])
+    ma20_idx = float(df_market["MA20"].iloc[-1])
+
+    is_healthy = curr_idx >= ma20_idx
+
+    if is_healthy:
+      msg = f"🟢 大盤多頭環境 (加權指數 {curr_idx:.2f} >= 月線 {ma20_idx:.2f})：多方結構完整，正常執行掃描。"
+    else:
+      msg = f"🔴 大盤逆風環境 (加權指數 {curr_idx:.2f} < 月線 {ma20_idx:.2f})：處於月線之下，建議提高警覺或空倉觀望！"
+
+    return is_healthy, round(curr_idx, 2), round(ma20_idx, 2), msg
+  except Exception as e:
+    return True, 0, 0, f"⚠️ 大盤檢驗異常: {str(e)}"
 
 
 # ============================================
@@ -278,9 +308,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄與網址參數記憶系統 (st.query_params)
+# 4. 側邊欄控制項與狀態初始化
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v24.5")
+st.sidebar.header("🕹️ 週輪動控制台 v25.0")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -293,40 +323,36 @@ max_price_input = st.sidebar.number_input(
     "最高股價 (元)", value=180.0, step=10.0
 )
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📋 個人專屬庫存 (專屬網址記憶)")
-st.sidebar.caption(
-    "💡 點擊下方按鈕後，您的庫存會自動編碼至網址中。將該網址加入書籤，即可隨時叫出您的專屬庫存，與他人完全獨立不干擾！"
-)
-st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
-
-# 從網址參數中讀取專屬庫存 (若沒有則使用預設值)
-default_inv_text = (
-    st.query_params["inv"]
-    if "inv" in st.query_params
-    else "2337, 70, 1000, 2026-10-19"
-)
-
-inventory_input = st.sidebar.text_area(
-    "編輯您的持倉內容", value=default_inv_text, height=150
-)
-
-# 儲存按鈕：將內容更新至網址參數中
-if st.sidebar.button("💾 產生/更新我的專屬庫存網址", use_container_width=True):
-  st.query_params["inv"] = inventory_input
-  st.sidebar.success(
-      "✅ 專屬網址已更新！請將瀏覽器當前頁面【加入書籤】，下次點開即是您的庫存。"
-  )
+if "inventory_text" not in st.session_state:
+  st.session_state["inventory_text"] = "2337, 70, 1000, 2026-10-19"
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (多用戶獨立網址版)")
+st.title("🏹 2026 週級別動能輪動系統 (大盤月線濾網防護版)")
 st.caption(
-    "💡 核心機制：低價庫存與週五強勢留倉股，自動以『週 5MA"
-    " 生命線』與『高點回落鎖利』進行動態防守，不讓大波段獲利回吐。"
+    "💡 核心機制：結合『大盤月線總開關』與『動態移動防守線』，在逆風環境自動提高篩選標準，過濾假突破雜訊。"
 )
 
+# 🔄 跨裝置設定碼同步面板
+with st.expander(
+    "🔄 【跨裝置同步】點此展開：匯出或匯入您的庫存設定碼", expanded=False
+):
+  col_ex, col_im = st.columns(2)
+  with col_ex:
+    st.markdown("**1️⃣ 從本機匯出設定碼**")
+    st.code(st.session_state["inventory_text"], language="text")
+  with col_im:
+    st.markdown("**2️⃣ 在此貼上並載入設定碼**")
+    imported_code = st.text_area(
+        "貼上設定碼", value=st.session_state["inventory_text"], height=80
+    )
+    if st.button("📥 立即載入並套用設定碼", type="primary"):
+      st.session_state["inventory_text"] = imported_code
+      st.success("✅ 庫存已同步更新完成！")
+      st.rerun()
+
+inventory_input = st.session_state["inventory_text"]
 _, names_map = get_market_map()
 
 # --- A. 庫存檢視模組 ---
@@ -340,13 +366,11 @@ inv_lines = [
 
 if inv_lines:
   inv_data = []
-
   for line in inv_lines:
     parts = [p.strip() for p in line.split(",")]
     try:
       tid = parts[0]
       cost_val = float(parts[1])
-
       shares = 1000
       buy_date = "未指定"
 
@@ -402,7 +426,6 @@ if inv_lines:
 
   if inv_data:
     df_inv = pd.DataFrame(inv_data)
-
     sum_invested = df_inv["raw_invested"].sum()
     sum_market = df_inv["raw_market_val"].sum()
     sum_profit = df_inv["raw_profit"].sum()
@@ -411,7 +434,7 @@ if inv_lines:
     )
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("總投入成本 (含摩擦成本)", f"NT$ {sum_invested:,}")
+    col1.metric("總投入成本 (含摩擦)", f"NT$ {sum_invested:,}")
     col2.metric("當前淨市值", f"NT$ {sum_market:,}")
     col3.metric(
         "帳面總淨損益",
@@ -435,15 +458,31 @@ if inv_lines:
     display_df.index = range(1, len(display_df) + 1)
     st.dataframe(display_df, use_container_width=True)
 else:
-  st.info(
-      "💡 請在側邊欄輸入持倉，格式：`代號, 成本, 股數, 買進日`，例如：`2337, 70,"
-      " 1000, 2026-10-19`"
-  )
+  st.info("💡 請透過上方設定碼面板輸入您的持倉內容。")
 
 st.markdown("---")
 
-# --- B. 全市場週動能掃描模組 ---
+# --- B. 全市場週動能掃描模組 (已連動大盤月線濾網) ---
+st.subheader("🌐 大盤宏觀環境檢視 (月線總開關)")
+market_ok, m_idx, m_ma20, market_msg = check_market_macro_filter()
+
+if market_ok:
+  st.success(market_msg)
+else:
+  st.error(market_msg)
+
 if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type="primary"):
+  # 🛡️ 智慧動態門檻調整：若大盤逆風，自動將評分門檻拉高 10 分以策安全
+  if not market_ok:
+    effective_target_win = min(target_win + 10, 95)
+    st.warning(
+        f"⚠️ 偵測到大盤處於月線之下（逆風環境），系統已自動將動能評分門檻從"
+        f" {target_win} 分提高至【 {effective_target_win} 分】進行嚴格過濾！"
+    )
+  else:
+    effective_target_win = target_win
+    st.info(f"🎯 本次掃描動能評分門檻：{effective_target_win} 分")
+
   final_results = []
   tickers, _ = get_market_map()
 
@@ -474,7 +513,8 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
               min_weekly_vol=min_weekly_vol_input,
           )
 
-          if res and res["動能評分"] >= target_win:
+          # 採用動態調整後的門檻進行篩選
+          if res and res["動能評分"] >= effective_target_win:
             final_results.append(res)
       except Exception:
         continue
@@ -484,7 +524,7 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
   if final_results:
     st.subheader(
         f"🏆 次週優先佈局名單 (股價: {int(min_price_input)}~{int(max_price_input)}"
-        f" 元，評分門檻: {target_win} 分)"
+        f" 元，有效門檻: {effective_target_win} 分)"
     )
     df_res = pd.DataFrame(final_results).sort_values(
         by="動能評分", ascending=False
@@ -493,5 +533,5 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
     st.dataframe(df_res, use_container_width=True)
   else:
     st.warning(
-        "⚠️ 目前無標的符合週線強勢突破條件。在多頭力道不足時，建議保留現金觀望。"
+        "⚠️ 目前無標的符合週線強勢突破條件（或因大盤逆風已自動提高門檻）。建議嚴守紀律，保留現金觀望。"
     )
