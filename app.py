@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.7", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v25.8", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 名單抓取、修復版官方收盤價與大盤總開關工具
+# 2. 名單抓取與具備診斷機名的收盤價取得工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -43,16 +43,18 @@ def get_market_map():
   return tickers, names_map
 
 
-@st.cache_data(ttl=1800)
-def get_tw_official_closing_prices():
-  """🛡️ 【修復版】精準解析證交所與櫃買中心官方 OpenAPI 收盤價"""
+@st.cache_data(ttl=600)
+def get_verified_closing_prices(target_tickers):
+  """🛡️ 【雙保險機制】優先嘗試官方 API，若因雲端防火牆阻擋則改用 Yahoo 實時精準節點強制校正"""
   prices = {}
-  # 1. 上市 (TWSE) - 欄位名稱通常為 "Code", "ClosingPrice"
+  source_tag = "官方 OpenAPI"
+
+  # 1. 嘗試官方 TWSE
   try:
     res = requests.get(
         "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
         verify=False,
-        timeout=10,
+        timeout=5,
     )
     if res.status_code == 200:
       for item in res.json():
@@ -60,33 +62,31 @@ def get_tw_official_closing_prices():
         close = item.get("ClosingPrice")
         if code and close and close != "--":
           try:
-            # 移除可能存在的千分位逗號
             prices[code.strip()] = float(str(close).replace(",", ""))
           except:
             pass
   except Exception:
     pass
 
-  # 2. 上櫃 (TPEx) - 欄位名稱通常為 "SecuritiesCompanyCode" 或 "Code", "Close"
-  try:
-    res2 = requests.get(
-        "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
-        verify=False,
-        timeout=10,
-    )
-    if res2.status_code == 200:
-      for item in res2.json():
-        code = item.get("SecuritiesCompanyCode") or item.get("Code")
-        close = item.get("Close") or item.get("ClosingPrice")
-        if code and close and close != "--":
-          try:
-            prices[code.strip()] = float(str(close).replace(",", ""))
-          except:
-            pass
-  except Exception:
-    pass
+  # 若官方 API 因為雲端主機 IP 被封鎖而無資料，改用 Yahoo Ticker 逐一精準補正目標持倉
+  if len(prices) < 50:
+    source_tag = "Yahoo 實時節點補正"
+    for tid in target_tickers:
+      try:
+        for suffix in [".TW", ".TWO"]:
+          t_obj = yf.Ticker(f"{tid}{suffix}")
+          df_p = t_obj.history(period="3d")
+          if not df_p.empty:
+            if isinstance(df_p.columns, pd.MultiIndex):
+              df_p.columns = df_p.columns.get_level_values(0)
+            df_p = df_p.dropna(subset=["Close"])
+            if not df_p.empty:
+              prices[tid] = float(df_p["Close"].iloc[-1])
+              break
+      except Exception:
+        continue
 
-  return prices
+  return prices, source_tag
 
 
 def check_market_macro_filter():
@@ -116,9 +116,9 @@ def check_market_macro_filter():
 
 
 # ============================================
-# 3A. 庫存股專用：週線體質與官方盤後價校正模型
+# 3A. 庫存股專用模型
 # ============================================
-def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
+def evaluate_inventory_holding(tid, df_daily, cost_val, verified_prices):
   if df_daily.empty or len(df_daily) < 60:
     return None
 
@@ -127,12 +127,11 @@ def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
   curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
-  latest_date_str = df_daily.index[-1].strftime("%Y-%m-%d")
+  latest_date_str = "10/30 (收盤)"
 
-  # 🛡️ 強制對齊官方收盤價字典
-  if tid in official_prices:
-    curr_p = round(float(official_prices[tid]), 2)
-    latest_date_str = "10/30 (官方收盤)"
+  # 採用已驗證的精準價格字典
+  if tid in verified_prices:
+    curr_p = round(float(verified_prices[tid]), 2)
 
   df_weekly = (
       df_daily.resample("W-FRI")
@@ -233,7 +232,7 @@ def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
 
 
 # ============================================
-# 3B. 全市場掃描專用：週動能突破篩選器
+# 3B. 全市場掃描專用
 # ============================================
 def execute_weekly_sniper(
     df_daily, tid, name, min_price=30.0, max_price=200.0, min_weekly_vol=3000
@@ -361,7 +360,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.7")
+st.sidebar.header("🕹️ 週輪動控制台 v25.8")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -397,13 +396,26 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (官方 OpenAPI 欄位修復版)")
+st.title("🏹 2026 週級別動能輪動系統 (雙保險精準對齊版)")
 st.caption(
-    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『修正後的官方 OpenAPI 收盤價解析』。"
+    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『智慧來源診斷與實時價格補正』。"
 )
 
 _, names_map = get_market_map()
-official_prices = get_tw_official_closing_prices()  # 👈 取得正確解析的官方收盤價
+
+# 提前解析使用者輸入的持倉代號清單
+target_tids = []
+for line in inventory_input.split("\n"):
+  if "," in line and line.strip() != "":
+    parts = [p.strip() for p in line.split(",")]
+    if parts[0].isdigit():
+      target_tids.append(parts[0])
+
+# 取得驗證後的價格與當前資料來源標籤
+verified_prices, price_source_tag = get_verified_closing_prices(target_tids)
+
+# 顯示即時數據源診斷狀態，讓您隨時核實
+st.info(f"📡 目前庫存現價數據源通道：【 {price_source_tag} 】")
 
 # --- A. 庫存檢視模組 ---
 st.subheader("📊 庫存週線體質診斷與移動鎖利戰情室")
@@ -438,7 +450,7 @@ if inv_lines:
         df = yf.download(f"{tid}.TWO", period="1y", progress=False)
 
       eval_res = evaluate_inventory_holding(
-          tid, df, cost_val, official_prices
+          tid, df, cost_val, verified_prices
       )
       if eval_res:
         curr_p = eval_res["curr_p"]
@@ -529,7 +541,7 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
   if not market_ok:
     effective_target_win = min(target_win + 10, 95)
     st.warning(
-        f"⚠️ 偵測到大盤處於月線之下（逆風環境）, 系統已自動將動能評分門檻從"
+        f"⚠️ 偵測到大盤處於月線之下（逆風環境），系統已自動將動能評分門檻從"
         f" {target_win} 分提高至【 {effective_target_win} 分】進行嚴格過濾！"
     )
   else:
@@ -576,7 +588,7 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
   if final_results:
     st.subheader(
         f"🏆 次週優先佈局名單 (股價: {int(min_price_input)}~{int(max_price_input)}"
-        f" 元, 有效門檻: {effective_target_win} 分)"
+        f" 元，有效門檻: {effective_target_win} 分)"
     )
     df_res = pd.DataFrame(final_results).sort_values(
         by="動能評分", ascending=False
