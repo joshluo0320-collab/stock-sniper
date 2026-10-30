@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.4", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v25.5", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 名單抓取、官方即時價與大盤總開關工具
+# 2. 名單抓取與大盤總開關工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -41,55 +41,6 @@ def get_market_map():
     except Exception:
       continue
   return tickers, names_map
-
-
-@st.cache_data(ttl=1800)
-def get_official_latest_prices():
-  """透過證交所與櫃買中心官方 OpenAPI 取得全市場最新收盤／現價，徹底解決 Yahoo 延遲問題"""
-  prices = {}
-  # 1. 抓取上市 (TWSE)
-  try:
-    res = requests.get(
-        "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
-        verify=False,
-        timeout=10,
-    )
-    if res.status_code == 200:
-      for item in res.json():
-        code = item.get("Code") or item.get("代號")
-        close = item.get("ClosingPrice") or item.get("收盤價")
-        if code and close:
-          try:
-            prices[code] = float(close)
-          except:
-            pass
-  except Exception:
-    pass
-
-  # 2. 抓取上櫃 (TPEx)
-  try:
-    res2 = requests.get(
-        "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
-        verify=False,
-        timeout=10,
-    )
-    if res2.status_code == 200:
-      for item in res2.json():
-        code = (
-            item.get("SecuritiesCompanyCode")
-            or item.get("Code")
-            or item.get("代號")
-        )
-        close = item.get("Close") or item.get("ClosingPrice") or item.get("收盤價")
-        if code and close:
-          try:
-            prices[code] = float(close)
-          except:
-            pass
-  except Exception:
-    pass
-
-  return prices
 
 
 def check_market_macro_filter():
@@ -119,9 +70,9 @@ def check_market_macro_filter():
 
 
 # ============================================
-# 3A. 庫存股專用：週線體質與官方現價對齊模型
+# 3A. 庫存股專用：強制即時盤價校正模型 (v25.5 精準對齊版)
 # ============================================
-def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
+def evaluate_inventory_holding(tid, df_daily, cost_val):
   if df_daily.empty or len(df_daily) < 60:
     return None
 
@@ -129,14 +80,27 @@ def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
     df_daily.columns = df_daily.columns.get_level_values(0)
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
-  # 預設使用歷史日線最後一筆
+  # 🛡️ 【核心修復】強制透過 yfinance Ticker 抓取最新一個交易日的實際收盤價
   curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
   latest_date_str = df_daily.index[-1].strftime("%Y-%m-%d")
 
-  # 🛡️ 【方案 1 核心】優先採用官方 OpenAPI 的最新收盤／現價，確保零落差
-  if tid in official_prices:
-    curr_p = round(float(official_prices[tid]), 2)
-    latest_date_str = "今日/最新官方"
+  try:
+    # 嘗試抓取最近 5 天的資料以確保抓到最新收盤
+    t_obj = yf.Ticker(f"{tid}.TW")
+    df_hist = t_obj.history(period="5d")
+    if df_hist.empty:
+      t_obj = yf.Ticker(f"{tid}.TWO")
+      df_hist = t_obj.history(period="5d")
+
+    if not df_hist.empty:
+      if isinstance(df_hist.columns, pd.MultiIndex):
+        df_hist.columns = df_hist.columns.get_level_values(0)
+      df_hist = df_hist.dropna(subset=["Close"])
+      if not df_hist.empty:
+        curr_p = round(float(df_hist["Close"].iloc[-1]), 2)
+        latest_date_str = df_hist.index[-1].strftime("%Y-%m-%d")
+  except Exception:
+    pass
 
   df_weekly = (
       df_daily.resample("W-FRI")
@@ -237,7 +201,7 @@ def evaluate_inventory_holding(tid, df_daily, cost_val, official_prices):
 
 
 # ============================================
-# 3B. 全市場掃描專用：週動能突破篩選器 (維持全部台股掃描)
+# 3B. 全市場掃描專用：週動能突破篩選器
 # ============================================
 def execute_weekly_sniper(
     df_daily, tid, name, min_price=30.0, max_price=200.0, min_weekly_vol=3000
@@ -365,7 +329,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.4")
+st.sidebar.header("🕹️ 週輪動控制台 v25.5")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -401,13 +365,12 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (官方 OpenAPI 即時對齊版)")
+st.title("🏹 2026 週級別動能輪動系統 (實時盤價強制校正版)")
 st.caption(
-    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『證交所／櫃買官方 OpenAPI 現價對齊』，徹底消除時間差落差。"
+    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『強制最新收盤價對齊』，確保戰情室數據與券商實況一致。"
 )
 
 _, names_map = get_market_map()
-official_prices = get_official_latest_prices()  # 👈 取得官方最新收盤行情
 
 # --- A. 庫存檢視模組 ---
 st.subheader("📊 庫存週線體質診斷與移動鎖利戰情室")
@@ -441,10 +404,7 @@ if inv_lines:
       if df.empty:
         df = yf.download(f"{tid}.TWO", period="1y", progress=False)
 
-      # 傳入官方現價字典進行對齊
-      eval_res = evaluate_inventory_holding(
-          tid, df, cost_val, official_prices
-      )
+      eval_res = evaluate_inventory_holding(tid, df, cost_val)
       if eval_res:
         curr_p = eval_res["curr_p"]
         p_date = eval_res["price_date"]
@@ -521,7 +481,7 @@ else:
 
 st.markdown("---")
 
-# --- B. 全市場週動能掃描模組 (維持全面掃描全部台股) ---
+# --- B. 全市場週動能掃描模組 ---
 st.subheader("🌐 大盤宏觀環境檢視 (月線總開關)")
 market_ok, m_idx, m_ma20, market_msg = check_market_macro_filter()
 
