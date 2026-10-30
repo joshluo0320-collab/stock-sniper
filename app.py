@@ -8,9 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.0 (大盤濾網版)",
-    page_icon="🏹",
-    layout="wide",
+    page_title="週動能獵殺與持倉巡航系統 v25.1", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
@@ -308,9 +306,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 4. 側邊欄控制項與狀態初始化
+# 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.0")
+st.sidebar.header("🕹️ 週輪動控制台 v25.1")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -323,36 +321,35 @@ max_price_input = st.sidebar.number_input(
     "最高股價 (元)", value=180.0, step=10.0
 )
 
-if "inventory_text" not in st.session_state:
-  st.session_state["inventory_text"] = "2337, 70, 1000, 2026-10-19"
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 個人專屬庫存 (自動同步)")
+st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
+
+# 從網址參數讀取庫存，若無則預設
+default_inv = (
+    st.query_params["inv"]
+    if "inv" in st.query_params
+    else "2337, 70, 1000, 2026-10-19\n3008, 4332.5, 10, 2026-10-19"
+)
+
+inventory_input = st.sidebar.text_area(
+    "編輯持倉（修改後點下方按鈕）", value=default_inv, height=150
+)
+
+if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
+  st.query_params["inv"] = inventory_input
+  st.sidebar.success(
+      "✅ 已更新！手機 App 用戶請將此頁面重新【加入主畫面】以綁定最新庫存。"
+  )
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (大盤月線濾網防護版)")
+st.title("🏹 2026 週級別動能輪動系統 (側邊欄固定記憶版)")
 st.caption(
     "💡 核心機制：結合『大盤月線總開關』與『動態移動防守線』，在逆風環境自動提高篩選標準，過濾假突破雜訊。"
 )
 
-# 🔄 跨裝置設定碼同步面板
-with st.expander(
-    "🔄 【跨裝置同步】點此展開：匯出或匯入您的庫存設定碼", expanded=False
-):
-  col_ex, col_im = st.columns(2)
-  with col_ex:
-    st.markdown("**1️⃣ 從本機匯出設定碼**")
-    st.code(st.session_state["inventory_text"], language="text")
-  with col_im:
-    st.markdown("**2️⃣ 在此貼上並載入設定碼**")
-    imported_code = st.text_area(
-        "貼上設定碼", value=st.session_state["inventory_text"], height=80
-    )
-    if st.button("📥 立即載入並套用設定碼", type="primary"):
-      st.session_state["inventory_text"] = imported_code
-      st.success("✅ 庫存已同步更新完成！")
-      st.rerun()
-
-inventory_input = st.session_state["inventory_text"]
 _, names_map = get_market_map()
 
 # --- A. 庫存檢視模組 ---
@@ -458,11 +455,11 @@ if inv_lines:
     display_df.index = range(1, len(display_df) + 1)
     st.dataframe(display_df, use_container_width=True)
 else:
-  st.info("💡 請透過上方設定碼面板輸入您的持倉內容。")
+  st.info("💡 請在左側邊欄輸入您的持倉內容。")
 
 st.markdown("---")
 
-# --- B. 全市場週動能掃描模組 (已連動大盤月線濾網) ---
+# --- B. 全市場週動能掃描模組 ---
 st.subheader("🌐 大盤宏觀環境檢視 (月線總開關)")
 market_ok, m_idx, m_ma20, market_msg = check_market_macro_filter()
 
@@ -472,7 +469,6 @@ else:
   st.error(market_msg)
 
 if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type="primary"):
-  # 🛡️ 智慧動態門檻調整：若大盤逆風，自動將評分門檻拉高 10 分以策安全
   if not market_ok:
     effective_target_win = min(target_win + 10, 95)
     st.warning(
@@ -513,7 +509,6 @@ if st.button("🔴 啟動全市場週動能掃描 (尋找下週新獵物)", type
               min_weekly_vol=min_weekly_vol_input,
           )
 
-          # 採用動態調整後的門檻進行篩選
           if res and res["動能評分"] >= effective_target_win:
             final_results.append(res)
       except Exception:
