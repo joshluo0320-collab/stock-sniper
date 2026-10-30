@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.8", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v25.9", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 名單抓取與具備診斷機名的收盤價取得工具
+# 2. 名單抓取與單股實時現價強制直連工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -43,50 +43,30 @@ def get_market_map():
   return tickers, names_map
 
 
-@st.cache_data(ttl=600)
-def get_verified_closing_prices(target_tickers):
-  """🛡️ 【雙保險機制】優先嘗試官方 API，若因雲端防火牆阻擋則改用 Yahoo 實時精準節點強制校正"""
-  prices = {}
-  source_tag = "官方 OpenAPI"
+def get_realtime_price_direct(tid):
+  """🛡️ 【v25.9 實時直連】繞過批次快取，直接對單一股票抓取最新實時價格與日期"""
+  for suffix in [".TW", ".TWO"]:
+    try:
+      t = yf.Ticker(f"{tid}{suffix}")
+      # 優先嘗試 fast_info 取得最新價
+      if hasattr(t, "fast_info") and "last_price" in t.fast_info:
+        p = t.fast_info["last_price"]
+        if p and p > 0:
+          return round(float(p), 2), "10/30 (實時直連)"
 
-  # 1. 嘗試官方 TWSE
-  try:
-    res = requests.get(
-        "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
-        verify=False,
-        timeout=5,
-    )
-    if res.status_code == 200:
-      for item in res.json():
-        code = item.get("Code")
-        close = item.get("ClosingPrice")
-        if code and close and close != "--":
-          try:
-            prices[code.strip()] = float(str(close).replace(",", ""))
-          except:
-            pass
-  except Exception:
-    pass
-
-  # 若官方 API 因為雲端主機 IP 被封鎖而無資料，改用 Yahoo Ticker 逐一精準補正目標持倉
-  if len(prices) < 50:
-    source_tag = "Yahoo 實時節點補正"
-    for tid in target_tickers:
-      try:
-        for suffix in [".TW", ".TWO"]:
-          t_obj = yf.Ticker(f"{tid}{suffix}")
-          df_p = t_obj.history(period="3d")
-          if not df_p.empty:
-            if isinstance(df_p.columns, pd.MultiIndex):
-              df_p.columns = df_p.columns.get_level_values(0)
-            df_p = df_p.dropna(subset=["Close"])
-            if not df_p.empty:
-              prices[tid] = float(df_p["Close"].iloc[-1])
-              break
-      except Exception:
-        continue
-
-  return prices, source_tag
+      # 其次嘗試 history 抓最近 2 天
+      df_h = t.history(period="2d")
+      if not df_h.empty:
+        if isinstance(df_h.columns, pd.MultiIndex):
+          df_h.columns = df_h.columns.get_level_values(0)
+        df_h = df_h.dropna(subset=["Close"])
+        if not df_h.empty:
+          p = float(df_h["Close"].iloc[-1])
+          d_str = df_h.index[-1].strftime("%m/%d")
+          return round(p, 2), f"{d_str} (收盤)"
+    except Exception:
+      continue
+  return None, "未知"
 
 
 def check_market_macro_filter():
@@ -116,9 +96,9 @@ def check_market_macro_filter():
 
 
 # ============================================
-# 3A. 庫存股專用模型
+# 3A. 庫存股專用：週線體質與實時直連評估模型
 # ============================================
-def evaluate_inventory_holding(tid, df_daily, cost_val, verified_prices):
+def evaluate_inventory_holding(tid, df_daily, cost_val):
   if df_daily.empty or len(df_daily) < 60:
     return None
 
@@ -126,12 +106,11 @@ def evaluate_inventory_holding(tid, df_daily, cost_val, verified_prices):
     df_daily.columns = df_daily.columns.get_level_values(0)
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
-  curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
-  latest_date_str = "10/30 (收盤)"
-
-  # 採用已驗證的精準價格字典
-  if tid in verified_prices:
-    curr_p = round(float(verified_prices[tid]), 2)
+  # 🛡️ 強制呼叫實時直連取得最新正確價格
+  curr_p, latest_date_str = get_realtime_price_direct(tid)
+  if curr_p is None:
+    curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
+    latest_date_str = df_daily.index[-1].strftime("%m/%d")
 
   df_weekly = (
       df_daily.resample("W-FRI")
@@ -360,7 +339,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.8")
+st.sidebar.header("🕹️ 週輪動控制台 v25.9")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -396,26 +375,12 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (雙保險精準對齊版)")
+st.title("🏹 2026 週級別動能輪動系統 (實時直連精準對齊版)")
 st.caption(
-    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『智慧來源診斷與實時價格補正』。"
+    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『單股實時直連 API 繞過快取機制』。"
 )
 
 _, names_map = get_market_map()
-
-# 提前解析使用者輸入的持倉代號清單
-target_tids = []
-for line in inventory_input.split("\n"):
-  if "," in line and line.strip() != "":
-    parts = [p.strip() for p in line.split(",")]
-    if parts[0].isdigit():
-      target_tids.append(parts[0])
-
-# 取得驗證後的價格與當前資料來源標籤
-verified_prices, price_source_tag = get_verified_closing_prices(target_tids)
-
-# 顯示即時數據源診斷狀態，讓您隨時核實
-st.info(f"📡 目前庫存現價數據源通道：【 {price_source_tag} 】")
 
 # --- A. 庫存檢視模組 ---
 st.subheader("📊 庫存週線體質診斷與移動鎖利戰情室")
@@ -449,9 +414,7 @@ if inv_lines:
       if df.empty:
         df = yf.download(f"{tid}.TWO", period="1y", progress=False)
 
-      eval_res = evaluate_inventory_holding(
-          tid, df, cost_val, verified_prices
-      )
+      eval_res = evaluate_inventory_holding(tid, df, cost_val)
       if eval_res:
         curr_p = eval_res["curr_p"]
         p_date = eval_res["price_date"]
