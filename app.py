@@ -8,7 +8,9 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.9", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v25.10 週末終極版",
+    page_icon="🏹",
+    layout="wide",
 )
 
 # 禁用不安全請求警告
@@ -16,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 名單抓取與單股實時現價強制直連工具
+# 2. 名單抓取與數據源核心工具
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -44,18 +46,11 @@ def get_market_map():
 
 
 def get_realtime_price_direct(tid):
-  """🛡️ 【v25.9 實時直連】繞過批次快取，直接對單一股票抓取最新實時價格與日期"""
+  """精準抓取最新收盤／現價與對應日期"""
   for suffix in [".TW", ".TWO"]:
     try:
       t = yf.Ticker(f"{tid}{suffix}")
-      # 優先嘗試 fast_info 取得最新價
-      if hasattr(t, "fast_info") and "last_price" in t.fast_info:
-        p = t.fast_info["last_price"]
-        if p and p > 0:
-          return round(float(p), 2), "10/30 (實時直連)"
-
-      # 其次嘗試 history 抓最近 2 天
-      df_h = t.history(period="2d")
+      df_h = t.history(period="3d")
       if not df_h.empty:
         if isinstance(df_h.columns, pd.MultiIndex):
           df_h.columns = df_h.columns.get_level_values(0)
@@ -96,7 +91,7 @@ def check_market_macro_filter():
 
 
 # ============================================
-# 3A. 庫存股專用：週線體質與實時直連評估模型
+# 3A. 庫存股評估模型
 # ============================================
 def evaluate_inventory_holding(tid, df_daily, cost_val):
   if df_daily.empty or len(df_daily) < 60:
@@ -106,7 +101,6 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
     df_daily.columns = df_daily.columns.get_level_values(0)
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
-  # 🛡️ 強制呼叫實時直連取得最新正確價格
   curr_p, latest_date_str = get_realtime_price_direct(tid)
   if curr_p is None:
     curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
@@ -211,7 +205,7 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
 
 
 # ============================================
-# 3B. 全市場掃描專用
+# 3B. 全市場週動能突破篩選器
 # ============================================
 def execute_weekly_sniper(
     df_daily, tid, name, min_price=30.0, max_price=200.0, min_weekly_vol=3000
@@ -339,7 +333,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.9")
+st.sidebar.header("🕹️ 週輪動控制台 v25.10")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -368,16 +362,14 @@ inventory_input = st.sidebar.text_area(
 
 if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
   st.query_params["inv"] = inventory_input
-  st.sidebar.success(
-      "✅ 已更新！手機 App 用戶請將此頁面重新【加入主畫面】以綁定最新庫存。"
-  )
+  st.sidebar.success("✅ 已更新！")
 
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (實時直連精準對齊版)")
+st.title("🏹 2026 週級別動能輪動系統 (週末終極完整版)")
 st.caption(
-    "💡 核心機制：結合『大盤月線總開關』、『動態移動防守線』與『單股實時直連 API 繞過快取機制』。"
+    "💡 核心機制：結合大盤月線總開關、動態移動防守線與週末零時差實時直連收盤價。"
 )
 
 _, names_map = get_market_map()
