@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.1", page_icon="🏹", layout="wide"
+    page_title="週動能獵殺與持倉巡航系統 v25.2", page_icon="🏹", layout="wide"
 )
 
 # 禁用不安全請求警告
@@ -70,7 +70,7 @@ def check_market_macro_filter():
 
 
 # ============================================
-# 3A. 庫存股專用：週線體質與續抱評估模型
+# 3A. 庫存股專用：週線體質與續抱評估模型 (增加日期透明化)
 # ============================================
 def evaluate_inventory_holding(df_daily, cost_val):
   if df_daily.empty or len(df_daily) < 60:
@@ -80,7 +80,9 @@ def evaluate_inventory_holding(df_daily, cost_val):
     df_daily.columns = df_daily.columns.get_level_values(0)
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
+  # 取得最新價格與該筆資料的真實日期，方便核實
   curr_p = round(float(df_daily["Close"].iloc[-1]), 2)
+  latest_date_str = df_daily.index[-1].strftime("%Y-%m-%d")
 
   df_weekly = (
       df_daily.resample("W-FRI")
@@ -169,6 +171,7 @@ def evaluate_inventory_holding(df_daily, cost_val):
 
   return {
       "curr_p": curr_p,
+      "price_date": latest_date_str,
       "ma5_w": ma5_w,
       "vol_ratio": f"{vol_ratio}x",
       "health_score": health_score,
@@ -308,7 +311,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.1")
+st.sidebar.header("🕹️ 週輪動控制台 v25.2")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -325,7 +328,6 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("📋 個人專屬庫存 (自動同步)")
 st.sidebar.caption("格式：`代號, 成本, 股數, 買進日(可選)`")
 
-# 從網址參數讀取庫存，若無則預設
 default_inv = (
     st.query_params["inv"]
     if "inv" in st.query_params
@@ -345,9 +347,9 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (側邊欄固定記憶版)")
+st.title("🏹 2026 週級別動能輪動系統 (現價透明核實版)")
 st.caption(
-    "💡 核心機制：結合『大盤月線總開關』與『動態移動防守線』，在逆風環境自動提高篩選標準，過濾假突破雜訊。"
+    "💡 核心機制：結合『大盤月線總開關』與『動態移動防守線』，並於庫存戰情室中清楚標示現價的對應資料基準日。"
 )
 
 _, names_map = get_market_map()
@@ -387,6 +389,7 @@ if inv_lines:
       eval_res = evaluate_inventory_holding(df, cost_val)
       if eval_res:
         curr_p = eval_res["curr_p"]
+        p_date = eval_res["price_date"]
         stock_name = names_map.get(tid, tid)
 
         raw_cost_total = cost_val * shares
@@ -406,6 +409,7 @@ if inv_lines:
             "持有股數": f"{shares:,} 股",
             "成本均價": cost_val,
             "當前現價": curr_p,
+            "現價日期": p_date,  # 👈 新增：明確標示價格日期供核實
             "預估淨損益": f"{net_profit_ntd:+,} 元",
             "淨報酬率": f"{p_l_pct:+.2f}%",
             "持倉階段": eval_res["stage_label"],
