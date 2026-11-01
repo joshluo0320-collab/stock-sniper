@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能獵殺與持倉巡航系統 v25.10 週末終極版",
+    page_title="週動能獵殺與持倉巡航系統 v25.11 雲端穩定版",
     page_icon="🏹",
     layout="wide",
 )
@@ -64,10 +64,11 @@ def get_realtime_price_direct(tid):
   return None, "未知"
 
 
+@st.cache_data(ttl=3600)
 def check_market_macro_filter():
-  """下載台股加權指數 (^TWII)，檢驗是否站上 20MA (月線)"""
+  """下載台股加權指數 (^TWII)，檢驗是否站上 20MA (月線) - 具備快取與逾時保護，防止雲端卡死"""
   try:
-    df_market = yf.download("^TWII", period="3mo", progress=False)
+    df_market = yf.download("^TWII", period="3mo", progress=False, timeout=5)
     if df_market.empty:
       return True, 0, 0, "⚠️ 無法取得大盤資料，暫以預設通過處理。"
 
@@ -87,7 +88,7 @@ def check_market_macro_filter():
 
     return is_healthy, round(curr_idx, 2), round(ma20_idx, 2), msg
   except Exception as e:
-    return True, 0, 0, f"⚠️ 大盤檢驗異常: {str(e)}"
+    return True, 0, 0, f"⚠️ 大盤檢驗逾時或異常，預設放行: {str(e)}"
 
 
 # ============================================
@@ -205,7 +206,7 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
 
 
 # ============================================
-# 3B. 全市場週動能突破篩選器
+# 3B. 全市場週動能突破篩選器 (全台股上市櫃)
 # ============================================
 def execute_weekly_sniper(
     df_daily, tid, name, min_price=30.0, max_price=200.0, min_weekly_vol=3000
@@ -333,7 +334,7 @@ def execute_weekly_sniper(
 # ============================================
 # 4. 側邊欄控制項與網址自動記憶系統
 # ============================================
-st.sidebar.header("🕹️ 週輪動控制台 v25.10")
+st.sidebar.header("🕹️ 週輪動控制台 v25.11")
 target_win = st.sidebar.slider("🎯 掃描動能評分門檻", 50, 95, 70, step=5)
 min_weekly_vol_input = st.sidebar.slider(
     "🌊 週成交量門檻 (張)", 1000, 10000, 3000, step=500
@@ -367,9 +368,9 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
 # ============================================
 # 5. 主頁面內容
 # ============================================
-st.title("🏹 2026 週級別動能輪動系統 (週末終極完整版)")
+st.title("🏹 2026 週級別動能輪動系統 (雲端穩定版)")
 st.caption(
-    "💡 核心機制：結合大盤月線總開關、動態移動防守線與週末零時差實時直連收盤價。"
+    "💡 核心機制：結合大盤月線總開關（具備快取防護）、動態移動防守線與週末收盤實時直連。"
 )
 
 _, names_map = get_market_map()
