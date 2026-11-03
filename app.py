@@ -8,7 +8,7 @@ import yfinance as yf
 
 # 1. 頁面基本配置
 st.set_page_config(
-    page_title="週動能波段與短線狙擊雙模組戰情室",
+    page_title="週動能波段與嚴苛短線狙擊戰情室",
     page_icon="🏹",
     layout="wide",
 )
@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================
-# 2. 核心工具與防呆保底載入
+# 2. 核心工具與防呆保底載入 (確保涵蓋全台股千檔)
 # ============================================
 @st.cache_data(ttl=86400)
 def get_market_map():
@@ -43,7 +43,6 @@ def get_market_map():
     except Exception:
       continue
 
-  # 🛡️ 防呆保底：若雲端開機抓不到清單，自動帶入常用標的避免崩潰
   if not names_map:
     names_map = {
         "2337": "旺宏",
@@ -91,13 +90,13 @@ def check_market_macro_filter():
 
     is_healthy = curr_idx >= ma20_idx
     if is_healthy:
-      msg = f"🟢 大盤多頭環境 (加權指數 {curr_idx:.2f} >= 月線 {ma20_idx:.2f})：多方結構完整。"
+      msg = f"🟢 大盤多頭環境 (加權指數 {curr_idx:.2f} >= 月線 {ma20_idx:.2f})"
     else:
-      msg = f"🔴 大盤逆風環境 (加權指數 {curr_idx:.2f} < 月線 {ma20_idx:.2f})：處於月線之下，建議提高警覺！"
+      msg = f"🔴 大盤逆風環境 (加權指數 {curr_idx:.2f} < 月線 {ma20_idx:.2f})"
 
     return is_healthy, round(curr_idx, 2), round(ma20_idx, 2), msg
   except Exception as e:
-    return True, 0, 0, f"⚠️ 大盤檢驗逾時或異常，預設放行: {str(e)}"
+    return True, 0, 0, f"⚠️ 大盤檢驗逾時: {str(e)}"
 
 
 # ============================================
@@ -106,7 +105,6 @@ def check_market_macro_filter():
 def evaluate_inventory_holding(tid, df_daily, cost_val):
   if df_daily.empty or len(df_daily) < 60:
     return None
-
   if isinstance(df_daily.columns, pd.MultiIndex):
     df_daily.columns = df_daily.columns.get_level_values(0)
   df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
@@ -127,34 +125,24 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
       })
       .dropna()
   )
-
   if len(df_weekly) < 12:
     return None
 
   curr_w = df_weekly.iloc[-1]
-  w_open = float(curr_w["Open"])
-  w_high = float(curr_w["High"])
-  w_low = float(curr_w["Low"])
   w_close = float(curr_w["Close"])
-  w_vol = float(curr_w["Volume"]) / 1000.0
-
   ma5_w = round(float(df_weekly["Close"].rolling(5).mean().iloc[-1]), 2)
   ma10_w = round(float(df_weekly["Close"].rolling(10).mean().iloc[-1]), 2)
   high_4w = float(df_weekly["High"].tail(4).max())
 
-  avg_vol_4w = float(df_weekly["Volume"].iloc[-5:-1].mean()) / 1000.0
-  vol_ratio = round(w_vol / avg_vol_4w, 2) if avg_vol_4w > 0 else 1.0
-
   raw_roi = ((curr_p / cost_val) - 1) * 100
-
   if raw_roi >= 15.0:
     dynamic_stop = round(max(high_4w * 0.93, ma5_w, cost_val * 1.05), 1)
     stage_label = "🦅 長波段鎖利"
   elif raw_roi >= 5.0:
-    dynamic_stop = round(max(cost_val * 1.01, min(w_low, ma5_w)), 1)
+    dynamic_stop = round(max(cost_val * 1.01, ma5_w), 1)
     stage_label = "🛡️ 保本推進"
   else:
-    dynamic_stop = round(max(cost_val * 0.955, w_low), 1)
+    dynamic_stop = round(max(cost_val * 0.955, float(curr_w["Low"])), 1)
     stage_label = "🌱 新倉觀察"
 
   health_score = 50
@@ -167,24 +155,18 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
   health_score = max(0, min(100, health_score))
 
   if curr_p <= dynamic_stop:
-    color_tag = "🔴 觸線出場"
-    model_advice = f"🚨 跌破動態防守線 ({dynamic_stop})，建議收網獲利！"
+    color_tag, model_advice = "🔴 觸線出場", f"🚨 跌破防守線 ({dynamic_stop})"
   elif curr_p < ma5_w:
-    color_tag = "🟡 趨勢轉弱"
-    model_advice = f"⚠️ 跌破週 5MA ({ma5_w})，建議減碼"
+    color_tag, model_advice = "🟡 趨勢轉弱", f"⚠️ 跌破 5MA ({ma5_w})"
   elif health_score >= 75:
-    color_tag = "🟢 強勢續抱"
-    model_advice = f"✅ 穩守週 5MA ({ma5_w}) 之上，可安心續抱"
+    color_tag, model_advice = "🟢 強勢續抱", f"✅ 穩守 5MA ({ma5_w})"
   else:
-    color_tag = "⚪ 正常觀察"
-    model_advice = f"📈 守住防守線 ({dynamic_stop})，依紀律續抱"
+    color_tag, model_advice = "⚪ 正常觀察", f"📈 守住防守線"
 
   return {
       "curr_p": curr_p,
       "price_date": latest_date_str,
       "ma5_w": ma5_w,
-      "vol_ratio": f"{vol_ratio}x",
-      "health_score": health_score,
       "stage_label": stage_label,
       "dynamic_stop": dynamic_stop,
       "color_tag": color_tag,
@@ -226,12 +208,13 @@ def execute_weekly_sniper(
       return None
 
     curr_w = df_weekly.iloc[-1]
-    curr_close = float(curr_w["Close"])
-    curr_high = float(curr_w["High"])
-    curr_low = float(curr_w["Low"])
-    curr_open = float(curr_w["Open"])
-    curr_vol = float(curr_w["Volume"]) / 1000.0
-
+    curr_close, curr_high, curr_low, curr_open, curr_vol = (
+        float(curr_w["Close"]),
+        float(curr_w["High"]),
+        float(curr_w["Low"]),
+        float(curr_w["Open"]),
+        float(curr_w["Volume"]) / 1000.0,
+    )
     if curr_vol < min_weekly_vol:
       return None
 
@@ -248,7 +231,6 @@ def execute_weekly_sniper(
 
     total_range = curr_high - curr_low
     upper_shadow = curr_high - max(curr_close, curr_open)
-    is_bullish = curr_close >= curr_open
     is_clean_candle = (
         (upper_shadow / total_range < 0.35) if total_range > 0 else True
     )
@@ -258,19 +240,16 @@ def execute_weekly_sniper(
         and curr_close > ma10_w
         and is_break_4w
         and vol_ratio >= 1.3
-        and is_bullish
+        and curr_close >= curr_open
         and is_clean_candle
     ):
       return None
 
-    score = 50
-    score += 20 if vol_ratio >= 1.8 else 10
-    win_score = min(score, 100)
-
+    score = 50 + (20 if vol_ratio >= 1.8 else 10)
     return {
         "名稱": name,
         "代號": tid,
-        "動能評分": win_score,
+        "動能評分": min(score, 100),
         "最新收盤": last_p,
         "週量比": f"{round(vol_ratio, 2)}x",
         "週成交量(張)": int(curr_vol),
@@ -282,9 +261,16 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 3C. 次日短線狙擊與風控模組 (短線)
+# 3C. 嚴苛版次日短線狙擊模組 (只選最強 Top 3)
 # ============================================
-def evaluate_next_day_momentum(df_daily, tid, name):
+def evaluate_strictest_next_day_momentum(df_daily, tid, name):
+  """極度嚴苛的隔日短線/當沖篩選模型：
+
+  1. 漲幅門檻提高：當日漲幅必須 >= 5.0%（拒絕溫吞股）。
+  2. 量能爆發雙倍：成交量必須 >= 5,000 張，且大於 20 日均量的 2 倍以上。
+  3. 價位結構極度乾淨：上影線嚴格限制小於總振幅的 20%（確保一路買到尾盤）。
+  4. 綜合動能評分計算。
+  """
   try:
     if df_daily.empty or len(df_daily) < 30:
       return None
@@ -294,11 +280,13 @@ def evaluate_next_day_momentum(df_daily, tid, name):
 
     curr_row = df_daily.iloc[-1]
     prev_row = df_daily.iloc[-2]
-    c_open = float(curr_row["Open"])
-    c_high = float(curr_row["High"])
-    c_low = float(curr_row["Low"])
-    c_close = float(curr_row["Close"])
-    c_vol = float(curr_row["Volume"]) / 1000.0
+    c_open, c_high, c_low, c_close = (
+        float(curr_row["Open"]),
+        float(curr_row["High"]),
+        float(curr_row["Low"]),
+        float(curr_row["Close"]),
+    )
+    c_vol = float(curr_row["Volume"]) / 1000.0  # 張數
 
     prev_close = float(prev_row["Close"])
     day_return_pct = ((c_close / prev_close) - 1) * 100
@@ -306,41 +294,49 @@ def evaluate_next_day_momentum(df_daily, tid, name):
 
     total_range = c_high - c_low
     upper_shadow = c_high - max(c_close, c_open)
-    is_clean_close = (
-        (upper_shadow / total_range < 0.35) if total_range > 0 else True
+
+    # 嚴苛過濾條件
+    is_clean_shadow = (
+        (upper_shadow / total_range < 0.20) if total_range > 0 else True
     )
 
-    # 隔日短線強勢條件：漲幅 >= 3%，收紅，上影線短，量放大
     if not (
-        day_return_pct >= 3.0
-        and c_close > c_open
-        and is_clean_close
-        and c_vol >= 3000
-        and c_vol >= avg_vol_20
+        day_return_pct >= 5.0  # 漲幅至少 5%
+        and c_close > c_open  # 必須收紅
+        and is_clean_shadow  # 上影線小於 20%（極度強勢鎖碼）
+        and c_vol >= 5000  # 成交量至少 5000 張
+        and c_vol >= avg_vol_20 * 2.0  # 成交量為 20 日均量兩倍以上
     ):
       return None
 
     entry_price = c_close
-    stop_loss_price = round(min(c_low, entry_price * 0.975), 1)
+    stop_loss_price = round(
+        min(c_low, entry_price * 0.98), 1
+    )  # 容錯低，嚴格 2% 停損
     target_profit_3pct = round(entry_price * 1.03, 1)
     target_profit_5pct = round(entry_price * 1.05, 1)
 
-    score = 50
-    score += 20 if day_return_pct >= 7.0 else 10
-    score = min(score, 100)
+    # 動能強力計分
+    score = 60
+    score += int(day_return_pct * 2)  # 漲幅越大分數越高
+    score += 20 if c_vol >= avg_vol_20 * 3.0 else 10
+    final_score = min(score, 100)
 
     return {
         "代號": tid,
         "名稱": name,
-        "動能評分": score,
-        "今日收盤價": c_close,
+        "短線動能分": final_score,
+        "收盤價": c_close,
         "今日漲幅": f"{round(day_return_pct, 2)}%",
         "成交量(張)": int(c_vol),
+        "量比(vs 20MA)": f"{round(c_vol/avg_vol_20, 1)}x",
         "建議進場參考": f"{entry_price} (收盤/明平開)",
         "🔴 嚴格停損價": stop_loss_price,
         "🟢 目標停利 (+3%)": target_profit_3pct,
         "🟢 目標停利 (+5%)": target_profit_5pct,
-        "執行紀律提示": "開盤 30 分鐘內未見買盤續強或跌破停損立即出場！",
+        "執行紀律提示": (
+            "開盤 30 分鐘內未見買盤續強或跌破停損線，立即無條件出場！"
+        ),
     }
   except Exception:
     return None
@@ -368,16 +364,14 @@ if st.sidebar.button("💾 儲存並更新專屬庫存網址", type="primary"):
   st.sidebar.success("✅ 已更新！")
 
 # ============================================
-# 5. 主頁面：雙模組分頁架構 (Tabs)
+# 5. 主頁面：雙模組分頁架構
 # ============================================
-st.title("🏹 智能動能戰情與風控系統 (雙模組整合版)")
+st.title("🏹 智能動能戰情與嚴苛風控系統 (全市場掃描)")
 
-# 載入市場代號
 _, names_map = get_market_map()
 
-# 建立分頁
 tab_wave, tab_short = st.tabs(
-    ["📊 長線波段戰情室 (Holding)", "⚡ 次日短線狙擊戰情室 (Day/Next-Day)"]
+    ["📊 長線波段戰情室 (Holding)", "⚡ 嚴苛短線狙擊戰情室 (僅取最強 Top 3)"]
 )
 
 # --- 標籤一：長線波段戰情室 ---
@@ -388,39 +382,38 @@ with tab_wave:
       for l in inventory_input.split("\n")
       if "," in l and l.strip() != ""
   ]
-
   if inv_lines:
     inv_data = []
     for line in inv_lines:
       parts = [p.strip() for p in line.split(",")]
       try:
         tid, cost_val = parts[0], float(parts[1])
-        shares = int(float(parts[2])) if len(parts) >= 3 and not ("-" in parts[2] or "/" in parts[2]) else 1000
-        
+        shares = (
+            int(float(parts[2]))
+            if len(parts) >= 3
+            and not ("-" in parts[2] or "/" in parts[2])
+            else 1000
+        )
         df = yf.download(f"{tid}.TW", period="1y", progress=False)
         if df.empty:
           df = yf.download(f"{tid}.TWO", period="1y", progress=False)
-
         eval_res = evaluate_inventory_holding(tid, df, cost_val)
         if eval_res:
           curr_p = eval_res["curr_p"]
-          stock_name = names_map.get(tid, tid)
-          invested = int(cost_val * shares)
-          market_val = int(curr_p * shares)
+          invested, market_val = int(cost_val * shares), int(curr_p * shares)
           profit = market_val - invested
           roi = round((profit / invested) * 100, 2) if invested > 0 else 0
-
           inv_data.append({
               "代號": tid,
-              "名稱": stock_name,
-              "持有股數": f"{shares:,}",
+              "名稱": names_map.get(tid, tid),
+              "股數": f"{shares:,}",
               "成本": cost_val,
               "現價": curr_p,
-              "預估淨損益": f"{profit:+,} 元",
+              "損益": f"{profit:+,}",
               "報酬率": f"{roi:+.2f}%",
               "階段": eval_res["stage_label"],
               "週5MA": eval_res["ma5_w"],
-              "動態防守線": eval_res["dynamic_stop"],
+              "防守線": eval_res["dynamic_stop"],
               "燈號": eval_res["color_tag"],
               "診斷": eval_res["model_advice"],
           })
@@ -441,7 +434,7 @@ with tab_wave:
     effective_target_win = target_win if market_ok else min(target_win + 10, 95)
     final_results = []
     tickers, _ = get_market_map()
-    with st.spinner("📡 正在掃描全台股週線動能..."):
+    with st.spinner(f"📡 正在掃描全台股共 {len(tickers)} 檔標的週線動能..."):
       for i in range(0, len(tickers), 60):
         chunk = tickers[i : i + 60]
         try:
@@ -464,13 +457,14 @@ with tab_wave:
           use_container_width=True,
       )
     else:
-      st.warning("⚠️ 目前無標的符合週線強勢突破條件，建議保持現金觀望。")
+      st.warning("⚠️ 目前無標的符合週線強勢突破條件，建議現金觀望。")
 
-# --- 標籤二：次日短線狙擊戰情室 ---
+# --- 標籤二：嚴苛短線狙擊戰情室 (僅取 Top 3) ---
 with tab_short:
-  st.subheader("⚡ 次日短線強勢狙擊與風控戰情室 (Next-Day Momentum)")
+  st.subheader("⚡ 次日短線極致嚴苛狙擊戰情室 (嚴格過濾・僅取前 3 強)")
   st.caption(
-      "💡 專為極短線設計：篩選強勢鎖碼、量能放大標的，提供明確進場、停損與 3%~5% 停利目標。"
+      "💡 條件嚴苛：漲幅需 >= 5%、量能需 >= 2 倍 20MA 且大於 5000 張、上影線 < 20%。"
+      "系統將掃描全台股千檔，並**強制精選出最強的前 3 支標的**。"
   )
 
   col_f1, col_f2 = st.columns(2)
@@ -479,28 +473,33 @@ with tab_short:
         "可用短線資金總額 (NT$)", value=270000, step=10000
     )
   with col_f2:
-    allocation_pct = st.slider("單筆短線試單佔總資金比例 (%)", 5, 30, 10, step=5)
+    allocation_pct = st.slider(
+        "單筆短線試單佔總資金比例 (%)", 5, 20, 10, step=5
+    )
 
   allocated_funds = int(total_capital * (allocation_pct / 100))
   st.info(
       f"💰 資金風控提示：單筆短線試單金額為 **NT$ {allocated_funds:,}"
-      "**（嚴格控制極小部位，風險可控）。"
+      "**（嚴格控制極小部位）。"
   )
 
-  if st.button("🚀 執行次日短線標的掃描", type="primary"):
+  if st.button("🚀 執行全市場嚴苛短線掃描 (鎖定 Top 3)", type="primary"):
     short_results = []
     tickers, _ = get_market_map()
-    with st.spinner("⚡ 正在過濾短線爆量強勢標的..."):
+
+    with st.spinner(
+        f"📡 正在掃描全台股上市櫃共 {len(tickers)} 檔，進行嚴苛短線過濾..."
+    ):
       for i in range(0, len(tickers), 60):
         chunk = tickers[i : i + 60]
         try:
           data = yf.download(
               chunk, period="60d", group_by="ticker", progress=False
-          )
+            )
           for t in chunk:
             tid = t.split(".")[0]
             df_stock = data[t] if len(chunk) > 1 else data
-            res = evaluate_next_day_momentum(
+            res = evaluate_strictest_next_day_momentum(
                 df_stock, tid, names_map.get(tid, tid)
             )
             if res:
@@ -509,13 +508,19 @@ with tab_short:
           continue
 
     if short_results:
-      st.success(f"🎯 成功篩選出 {len(short_results)} 檔次日短線強勢候選標的：")
-      df_short = pd.DataFrame(short_results).sort_values(
-          by="動能評分", ascending=False
+      # 依照短線動能分由高到低排序，並強制只取前 3 名 (Top 3)
+      df_short_all = pd.DataFrame(short_results).sort_values(
+          by="短線動能分", ascending=False
       )
-      df_short.index = range(1, len(df_short) + 1)
-      st.dataframe(df_short, use_container_width=True)
+      df_top3 = df_short_all.head(3).copy()
+      df_top3.index = range(1, len(df_top3) + 1)
+
+      st.success(
+          f"🏆 掃描完成！從全市場千檔中嚴格過濾，為您鎖定【最強前 3 支】短線極致強勢標的："
+      )
+      st.dataframe(df_top3, use_container_width=True)
     else:
       st.warning(
-          "⚠️ 今日盤面無符合「爆量強勢收高」條件的短線標的。空手也是一種防守。"
+          "⚠️ 今日盤面行情過於弱勢或無標的同時滿足「漲幅>=5%、量大2倍、極短上影線」的嚴苛條件。"
+          "此時全市場無符合資格的短線飆股，強烈建議【空手觀望】以策安全！"
       )
