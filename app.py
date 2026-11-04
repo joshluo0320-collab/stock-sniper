@@ -129,7 +129,6 @@ def evaluate_inventory_holding(tid, df_daily, cost_val):
     return None
 
   curr_w = df_weekly.iloc[-1]
-  w_close = float(curr_w["Close"])
   ma5_w = round(float(df_weekly["Close"].rolling(5).mean().iloc[-1]), 2)
   ma10_w = round(float(df_weekly["Close"].rolling(10).mean().iloc[-1]), 2)
   high_4w = float(df_weekly["High"].tail(4).max())
@@ -261,7 +260,7 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 3C. 嚴苛版次日短線狙擊模組 (修正基準與小數點)
+# 3C. 嚴苛版次日短線狙擊模組 (已校正即時價與收盤基準)
 # ============================================
 def evaluate_strictest_next_day_momentum(df_daily, tid, name):
   try:
@@ -271,15 +270,19 @@ def evaluate_strictest_next_day_momentum(df_daily, tid, name):
       df_daily.columns = df_daily.columns.get_level_values(0)
     df_daily = df_daily.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
+    # 🛡️ 優先透過即時 API 取得券商級的真實現價，對齊盤後真實收盤
+    realtime_p, _ = get_realtime_price_direct(tid)
+
     curr_row = df_daily.iloc[-1]
     prev_row = df_daily.iloc[-2]
-    
-    # 嚴格對齊真實昨收價與收盤價
+
     prev_close = float(prev_row["Close"])
     c_open = float(curr_row["Open"])
     c_high = float(curr_row["High"])
     c_low = float(curr_row["Low"])
-    c_close = float(curr_row["Close"])
+
+    # 如果抓得到即時現價，優先以即時現價為準；否則才用日線收盤
+    c_close = float(realtime_p) if realtime_p else float(curr_row["Close"])
     c_vol = float(curr_row["Volume"]) / 1000.0  # 張數
 
     day_return_pct = ((c_close / prev_close) - 1) * 100
