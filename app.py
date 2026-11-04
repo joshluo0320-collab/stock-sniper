@@ -261,16 +261,9 @@ def execute_weekly_sniper(
 
 
 # ============================================
-# 3C. 嚴苛版次日短線狙擊模組 (只選最強 Top 3)
+# 3C. 嚴苛版次日短線狙擊模組 (修正基準與小數點)
 # ============================================
 def evaluate_strictest_next_day_momentum(df_daily, tid, name):
-  """極度嚴苛的隔日短線/當沖篩選模型：
-
-  1. 漲幅門檻提高：當日漲幅必須 >= 5.0%（拒絕溫吞股）。
-  2. 量能爆發雙倍：成交量必須 >= 5,000 張，且大於 20 日均量的 2 倍以上。
-  3. 價位結構極度乾淨：上影線嚴格限制小於總振幅的 20%（確保一路買到尾盤）。
-  4. 綜合動能評分計算。
-  """
   try:
     if df_daily.empty or len(df_daily) < 30:
       return None
@@ -280,45 +273,42 @@ def evaluate_strictest_next_day_momentum(df_daily, tid, name):
 
     curr_row = df_daily.iloc[-1]
     prev_row = df_daily.iloc[-2]
-    c_open, c_high, c_low, c_close = (
-        float(curr_row["Open"]),
-        float(curr_row["High"]),
-        float(curr_row["Low"]),
-        float(curr_row["Close"]),
-    )
+    
+    # 嚴格對齊真實昨收價與收盤價
+    prev_close = float(prev_row["Close"])
+    c_open = float(curr_row["Open"])
+    c_high = float(curr_row["High"])
+    c_low = float(curr_row["Low"])
+    c_close = float(curr_row["Close"])
     c_vol = float(curr_row["Volume"]) / 1000.0  # 張數
 
-    prev_close = float(prev_row["Close"])
     day_return_pct = ((c_close / prev_close) - 1) * 100
     avg_vol_20 = float(df_daily["Volume"].tail(20).mean()) / 1000.0
 
     total_range = c_high - c_low
     upper_shadow = c_high - max(c_close, c_open)
-
-    # 嚴苛過濾條件
     is_clean_shadow = (
         (upper_shadow / total_range < 0.20) if total_range > 0 else True
     )
 
+    # 嚴苛過濾條件
     if not (
         day_return_pct >= 5.0  # 漲幅至少 5%
         and c_close > c_open  # 必須收紅
-        and is_clean_shadow  # 上影線小於 20%（極度強勢鎖碼）
+        and is_clean_shadow  # 上影線小於 20%
         and c_vol >= 5000  # 成交量至少 5000 張
         and c_vol >= avg_vol_20 * 2.0  # 成交量為 20 日均量兩倍以上
     ):
       return None
 
-    entry_price = c_close
-    stop_loss_price = round(
-        min(c_low, entry_price * 0.98), 1
-    )  # 容錯低，嚴格 2% 停損
-    target_profit_3pct = round(entry_price * 1.03, 1)
-    target_profit_5pct = round(entry_price * 1.05, 1)
+    # 價格精準四捨五入到小數點第二位
+    entry_price = round(c_close, 2)
+    stop_loss_price = round(min(c_low, entry_price * 0.98), 2)  # 嚴格 2% 停損
+    target_profit_3pct = round(entry_price * 1.03, 2)
+    target_profit_5pct = round(entry_price * 1.05, 2)
 
-    # 動能強力計分
     score = 60
-    score += int(day_return_pct * 2)  # 漲幅越大分數越高
+    score += int(day_return_pct * 2)
     score += 20 if c_vol >= avg_vol_20 * 3.0 else 10
     final_score = min(score, 100)
 
@@ -334,9 +324,7 @@ def evaluate_strictest_next_day_momentum(df_daily, tid, name):
         "🔴 嚴格停損價": stop_loss_price,
         "🟢 目標停利 (+3%)": target_profit_3pct,
         "🟢 目標停利 (+5%)": target_profit_5pct,
-        "執行紀律提示": (
-            "開盤 30 分鐘內未見買盤續強或跌破停損線，立即無條件出場！"
-        ),
+        "執行紀律提示": "開盤 30 分鐘內未見買盤續強或跌破停損線，立即無條件出場！",
     }
   except Exception:
     return None
@@ -495,7 +483,7 @@ with tab_short:
         try:
           data = yf.download(
               chunk, period="60d", group_by="ticker", progress=False
-            )
+          )
           for t in chunk:
             tid = t.split(".")[0]
             df_stock = data[t] if len(chunk) > 1 else data
@@ -508,7 +496,6 @@ with tab_short:
           continue
 
     if short_results:
-      # 依照短線動能分由高到低排序，並強制只取前 3 名 (Top 3)
       df_short_all = pd.DataFrame(short_results).sort_values(
           by="短線動能分", ascending=False
       )
